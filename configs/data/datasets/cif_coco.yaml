@@ -1,0 +1,13 @@
+# cif_coco (ibm-research/cif-dataset), already downloaded locally in COCO format with its own
+# train/val/test splits — used as-is, no re-splitting.
+name: cif_coco
+images_roots:
+  train: /home/eyacherif/Projects/port_damage_EC/data/cif_coco/train/images
+  val: /home/eyacherif/Projects/port_damage_EC/data/cif_coco/val/images
+  test: /home/eyacherif/Projects/port_damage_EC/data/cif_coco/test/images
+annotations:
+  train: /home/eyacherif/Projects/port_damage_EC/data/cif_coco/train/annotations.json
+  val: /home/eyacherif/Projects/port_damage_EC/data/cif_coco/val/annotations.json
+  test: /home/eyacherif/Projects/port_damage_EC/data/cif_coco/test/annotations.json
+label_mapping_path: configs/data/label_maps/cif6_to_mvp5.yaml
+native_categories: [Algae, Crack, NetCrack, CrackPrecip, Rust, Spalling]

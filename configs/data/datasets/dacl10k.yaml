@@ -1,0 +1,23 @@
+# dacl10k-v2, merged from per-image labelme files into one COCO file per split by
+# data/merge_dacl10k.py (see data/processed/dacl10k_merged/merge_report.json for the merge log).
+# Paths below: the merged annotation files live inside this repo (relative to this YAML, portable); the images stay in their original,
+# machine-specific location — edit `images_roots` for your machine.
+# Images stay in their original location (dacl10k_v2_devphase/images/*) — the merge only produces
+# new annotation JSON, not a copy of the images.
+#
+# dacl10k ships with no labeled test set. Native splits below are "train" and "val" (= dacl10k's
+# official "validation" split) as they exist on disk; the train/val/test *role* assignment used
+# for training (carve a val subset out of train, promote official val to test — user-confirmed,
+# see CLAUDE.md) is applied by data/datasets/combined_dataset.py, not baked into this file.
+name: dacl10k
+images_roots:
+  train: /home/eyacherif/Projects/port_damage_EC/data/dacl10k_v2_devphase/images/train
+  val: /home/eyacherif/Projects/port_damage_EC/data/dacl10k_v2_devphase/images/val
+annotations:
+  train: ../../../data/processed/dacl10k_merged/train/annotations.json
+  val: ../../../data/processed/dacl10k_merged/val/annotations.json
+label_mapping_path: configs/data/label_maps/dacl10k_19_to_mvp5.yaml
+native_categories:
+  [ACrack, Bearing, Cavity, Crack, Drainage, EJoint, Efflorescence, ExposedRebars, Graffiti,
+   Hollowareas, JTape, PEquipment, Restformwork, Rockpocket, Rust, Spalling, WConccor,
+   Weathering, Wetspot]

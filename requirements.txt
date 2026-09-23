@@ -1,0 +1,21 @@
+# Direct dependencies (loose bounds). Exact working versions: requirements-freeze.txt.
+# Install torch/torchvision FIRST with the CUDA build that matches your driver, e.g.:
+#   pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
+torch>=2.8
+torchvision>=0.23
+transformers>=5.0
+segmentation-models-pytorch>=0.5
+timm>=1.0
+albumentations>=2.0
+opencv-python>=4.9
+pycocotools>=2.0.11
+scikit-image>=0.24
+scipy
+wandb>=0.18
+pyyaml>=6.0
+numpy
+pandas
+matplotlib
+tqdm
+pypdf>=4.0
+pytest>=8.0

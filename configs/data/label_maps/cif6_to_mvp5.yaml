@@ -1,0 +1,31 @@
+# cif_coco (6-class native taxonomy) -> MVP 5-class taxonomy.
+#
+# PROVENANCE. Reverse-engineered by exact annotation-count matching against the user's own pre-existing
+# remap (port_damage_EC/data/cif_coco/test/remapped_annotations_5daclcl.json), confirmed by the user as ground
+# truth. Verified on the test split (1,115 images): every predicted count matches exactly, including two mappings
+# that cannot be guessed from the names (CrackPrecip -> Efflorescence, Algae -> Wetspot).
+# Section numbers: BAWMerkblatt MSV-A 2023 (printed pages; PDF page = printed + 4), checked against the PDF text.
+#
+# LABEL-SEMANTICS WARNING (from the EDA, see docs/dataset_report.md). cif_coco "Crack"/"NetCrack" polygons often
+# outline whole cracked REGIONS (entire tiles shaded), whereas dacl10k cracks are thin lines: Cracks cover 17.7% of
+# all cif_coco pixels vs 1.8% in dacl10k. The merged Cracks channel therefore mixes region-type and line-type
+# labels; thin-structure metrics (clDice) are only meaningful on dacl10k-style crack lines. Per-source metrics are
+# reported by scripts/evaluate.py for exactly this reason.
+
+Crack: Cracks       # 3.3 "Risse im Massivbau"
+NetCrack: Cracks    # 3.1.5 "Netzrisse" = "flaechiges Rissbild" (area-wide crack pattern), a crack phenomenon.
+                    # verified: test-split Cracks 1119 == Crack 609 + NetCrack 510
+
+CrackPrecip: Efflorescence  # FLAG. NOT Cracks despite the name: mineral precipitate at/around a crack. The Merkblatt defines
+                            # efflorescence as "Ablagerungen aus ausgefälltem Material" (3.2.2) and lists Ausblühung/Aussinterung
+                            # under 3.1.6; 3.1.5 even lists Ausblühungen as a companion of network cracking.
+                            # verified: test-split Efflorescence 509 == CrackPrecip 509
+
+Rust: Rust          # 5.1 "Korrosion", 3.4.1 "Bewehrung korrodiert" — verified 521 == 521
+Spalling: Spalling  # 3.1.2 "Oberflaeche geschaedigt" (Abplatzung) — verified 547 == 547
+
+Algae: Wetspot      # FLAG (proxy label). The Merkblatt has NO algae/vegetation damage class (its only "Bewuchs" mention is marine
+                    # growth on anodes). cif_coco has no Wetspot class; algae indicates persistent moisture, the condition
+                    # 3.1.4 "Feucht- und Nassfläche" describes, so the user's data uses Algae as the closest visual proxy.
+                    # verified: test-split Wetspot 535 == Algae 535.
+                    # Caveat: algae can grow on damp-but-not-wet surfaces, so this channel is noisier than dacl10k's Wetspot.

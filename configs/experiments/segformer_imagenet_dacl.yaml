@@ -1,0 +1,79 @@
+# SegFormer MiT-b1 with ImageNet-only init, trained on dacl10k ONLY — the leakage-free counterpart of segformer_task_pretrained_dacl.yaml.
+name: segformer_imagenet_dacl
+seed: 42
+data:
+  sources:
+  - dacl10k
+  dataset_config_paths:
+    dacl10k: configs/data/datasets/dacl10k.yaml
+  mvp_classes:
+  - Cracks
+  - Wetspot
+  - Spalling
+  - Rust
+  - Efflorescence
+  image_size: 512
+  dacl10k_test_strategy: carve_val_from_train
+  dacl10k_val_fraction: 0.1
+  split_seed: 42
+  batch_size: 8
+  num_workers: 4
+model:
+  name: segformer
+  encoder_name: nvidia/mit-b1
+  init_mode: from_scratch
+  dropout: 0.2
+  num_classes: 5
+  thin_structure_classes:
+  - Cracks
+  task_pretrained_checkpoint: null
+  load_decode_head: true
+  load_classifier: false
+loss:
+  focal_weight: 1.0
+  dice_weight: 1.0
+  boundary_weight: 0.0
+  dice_variant: tversky
+  default_alpha: 0.25
+  default_gamma: 2.0
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  per_class_alpha:
+    Cracks: 0.35
+  per_class_gamma:
+    Cracks: 2.5
+training:
+  max_epochs: 30
+  warmup_epochs: 2
+  lr_head: 0.0006
+  lr_backbone: 6.0e-05
+  weight_decay: 0.01
+  frozen_epochs: 2
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0001
+  early_stopping_metric: val_macro_dice
+  device: cuda
+  amp: true
+  grad_accum_steps: 1
+  checkpoint_dir: runs
+augmentation:
+  horizontal_flip_p: 0.5
+  vertical_flip_p: 0.5
+  rotate90_p: 0.5
+  shift_scale_rotate_p: 0.5
+  shift_limit: 0.05
+  scale_limit: 0.1
+  rotate_limit: 15
+  blur_p: 0.3
+  blur_sigma_min: 0.4
+  blur_sigma_max: 2.5
+  color_jitter_p: 0.5
+  brightness_limit: 0.2
+  contrast_limit: 0.2
+  hue_shift_limit: 5
+wandb:
+  entity: eya-cherif14
+  project: damage_detection
+  mode: online
+  log_images_every_n_epochs: 5
+  num_logged_images: 8
