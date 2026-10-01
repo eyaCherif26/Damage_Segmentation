@@ -1,0 +1,56 @@
+# dacl10k (19-class v2 taxonomy) -> MVP 5-class taxonomy.
+#
+# PROVENANCE. The mapping is NOT a fresh design: it was reverse-engineered by exact annotation-count
+# matching against the user's own pre-existing remap
+# (port_damage_EC/data/dacl_resized/{train,val}/remapped_annotations_5damages.json), which the user
+# confirmed is the ground truth to follow. Every predicted per-class count matched exactly on both
+# splits (train Cracks: 3154 Crack + 376 ACrack = 3530; val Wetspot: 218 Wetspot + 570 Weathering = 788;
+# train Spalling: 8484 + 1753 ExposedRebars + 525 Rockpocket + 8119 Cavity = 18881; etc.).
+#
+# REFERENCE TAXONOMY. Section numbers refer to BAWMerkblatt MSV-A "Schadensbewertung an
+# Verkehrswasserbauwerken der Inspektionskategorie A", Ausgabe 2023 (printed page numbers; PDF page = printed + 4).
+# Citations below were checked against the extracted text of the PDF. The Merkblatt is organised by
+# material/construction type (Massivbau / Stahl(wasser)bau / ...), not by the dacl10k class list, so
+# several mappings are approximate; those are marked FLAG.
+
+Crack: Cracks          # 3.3 "Risse im Massivbau" (3.3.1 Einzelrisse im Stahlbeton, 3.3.2 im unbewehrten Beton), 5.3 "Risse" (Stahl)
+ACrack: Cracks         # FLAG (approximate). Alligator crack ~ 3.1.5 "Netzrisse", which the Merkblatt describes as a
+                       # "flaechiges Rissbild" (area-wide crack pattern) -> a crack phenomenon, not a separate class.
+
+Rust: Rust             # 5.1 "Korrosion" (Stahl), 3.4.1 "Bewehrung korrodiert"; rust stains: 3.1.6 "Rostfahne"
+
+Efflorescence: Efflorescence   # 3.1.6 "Ausblühung" (Salzausscheidung / Treibreaktion) and "Aussinterung" (Kalkauslaugung);
+                               # masonry: 3.2.1/3.2.2 "Ausblühungen ... Ablagerungen aus ausgefälltem Material"
+
+Wetspot: Wetspot       # 3.1.4 "Oberfläche mit Feuchtigkeitsaustritt" = "Feucht- und Nassfläche" (+ punktueller Wasseraustritt); 3.2.4 masonry
+Weathering: Wetspot    # FLAG (does not map cleanly; follows the user's existing data). Basis: the dacl10k paper itself
+                       # (Flotzinger et al., WACV 2024, Sec. 3.3) reports Weathering and Wetspot are visually near-identical
+                       # (round, darker area with a brighter surround) and often overlap. The Merkblatt has no "Weathering"
+                       # class for concrete; the nearest concept is 3.1.1 "Oberflaeche systematisch abgetragen" (systematic
+                       # surface loss), which is arguably closer to surface loss than to moisture. The Wetspot channel is
+                       # therefore "wet-looking or weathered discoloured surface", not strictly "moisture egress".
+
+Spalling: Spalling     # 3.1.2 "Oberflaeche geschaedigt" (Abplatzung, incl. "Abplatzung ueber korrodierter Bewehrung")
+ExposedRebars: Spalling # FLAG. 3.1.2 "Bewehrung freigelegt" is listed alongside Abplatzung, but the Merkblatt assesses the
+                        # rebar corrosion itself separately (3.4.1 "Bewehrung korrodiert"). Merging drops that distinct signal.
+Rockpocket: Spalling   # FLAG (different damage process). "Kiesnest" is a Merkblatt term, but under 3.1.3 "Oberflaeche offen"
+                       # (construction/compaction defect: "Verdichtungsmangel"), not 3.1.2 spalling. Merged because PROMPT.md
+                       # lists rock pocket/honeycombing as a Spalling subcategory and the user's data does so.
+Cavity: Spalling       # FLAG. Same section as Rockpocket ("Oberflaeche offenporig (Lunker)", 3.1.3). dacl10k-v2 split Cavity out of
+                       # Rockpocket (Dacl-Challenge paper, Sec. 3.1: they differ mainly in size); re-merged here as in the user's data.
+                       # Consequence: Spalling mixes progressive damage (3.1.2) with construction defects (3.1.3).
+
+# --- Mapped to null: not one of the 5 MVP classes. Dropped from the target channels but NOT validity-masked:
+# a polygon of these classes is a confirmed negative for the 5 MVP classes at those pixels. ---
+Hollowareas: null      # FLAG (differs from PROMPT.md's text, follows the user's data). PROMPT.md lists "hollow areas" as a Spalling
+                       # subcategory, but the user's existing cleaned data does NOT merge it (verified by count). dacl10k annotates
+                       # chalk markings of acoustically detected areas (not visually identifiable); the Merkblatt mentions
+                       # "Hohl-/Fehlstellen" only in a masonry context.
+Restformwork: null     # FLAG (differs from PROMPT.md's text). No Merkblatt equivalent (no "Schalung" term). Not merged in the user's data.
+Graffiti: null         # not a structural damage; no Merkblatt equivalent
+Bearing: null          # component/object, not a damage type
+EJoint: null           # component/object (expansion joint)
+Drainage: null         # component/object
+PEquipment: null       # component/object (protective equipment)
+JTape: null            # component/object (joint tape)
+WConccor: null         # "washouts / concrete corrosion": erosion-type loss, out of MVP scope

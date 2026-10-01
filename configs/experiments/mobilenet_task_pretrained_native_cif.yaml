@@ -1,0 +1,91 @@
+# MobileNetV3-Large (torchvision encoder + FPN) initialised from a dacl1k-pretrained bikit checkpoint
+# (308/308 encoder tensors, already 512px-native — no resolution mismatch for this backbone either way),
+# combined cif_coco + dacl10k data, trained at NATIVE resolution (data.resize_mode: native_crop) instead
+# of the whole-image-squeeze-to-512 that mobilenet_task_pretrained.yaml uses — see CLAUDE.md's
+# scale-investigation addendum for why. Everything else (checkpoint, loss, training, augmentation) is
+# identical to that config; only the data-loading/resizing strategy differs. Other local checkpoint
+# options: meta{2,4}+dacl1k_*, dacl1k_MobileNetV3-Large_*. Set the checkpoint path for your machine.
+name: mobilenet_task_pretrained_native_cif
+seed: 42
+data:
+  sources:
+  - cif_coco
+  dataset_config_paths:
+    cif_coco: configs/data/datasets/cif_coco.yaml
+  mvp_classes:
+  - Cracks
+  - Wetspot
+  - Spalling
+  - Rust
+  - Efflorescence
+  image_size: 512
+  dacl10k_test_strategy: carve_val_from_train
+  dacl10k_val_fraction: 0.1
+  split_seed: 42
+  batch_size: 8
+  num_workers: 4
+  resize_mode: native_crop
+  pixel_scale: 1.0
+  train_scale_jitter: 0.25
+  fg_crop_prob: 0.7
+  train_crops_per_image: 1
+  val_crops_per_image: 1
+model:
+  name: smp_mobilenet
+  encoder_name: mobilenet
+  decoder: fpn
+  init_mode: task_pretrained
+  dropout: 0.2
+  num_classes: 5
+  thin_structure_classes:
+  - Cracks
+  task_pretrained_checkpoint: /home/eyacherif/Projects/port_damage_EC/bikit_models/models/checkpoints/meta3+dacl1k/meta3+dacl1k_MobileNetV3-Large_dhb.pth
+loss:
+  focal_weight: 1.0
+  dice_weight: 1.0
+  boundary_weight: 0.0
+  dice_variant: tversky
+  default_alpha: 0.25
+  default_gamma: 2.0
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  per_class_alpha:
+    Cracks: 0.35
+  per_class_gamma:
+    Cracks: 2.5
+training:
+  max_epochs: 30
+  warmup_epochs: 2
+  lr_head: 0.001
+  lr_backbone: 0.0001
+  weight_decay: 0.01
+  grad_clip_max_norm: 1.0   # <- add this line
+  frozen_epochs: 2
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0001
+  early_stopping_metric: val_macro_dice
+  device: cuda
+  amp: true
+  grad_accum_steps: 1
+  checkpoint_dir: runs
+augmentation:
+  horizontal_flip_p: 0.5
+  vertical_flip_p: 0.5
+  rotate90_p: 0.5
+  shift_scale_rotate_p: 0.5
+  shift_limit: 0.05
+  scale_limit: 0.1
+  rotate_limit: 15
+  blur_p: 0.3
+  blur_sigma_min: 0.4
+  blur_sigma_max: 2.5
+  color_jitter_p: 0.5
+  brightness_limit: 0.2
+  contrast_limit: 0.2
+  hue_shift_limit: 5
+wandb:
+  entity: eya-cherif14
+  project: damage_detection
+  mode: online
+  log_images_every_n_epochs: 5
+  num_logged_images: 8

@@ -1,0 +1,7 @@
+name: infra_hafen
+images_roots:
+  train: /home/eyacherif/Projects/new_data_infracloud/hafen_v11_annotationen/bildern
+annotations:
+  train: data/processed/hafen_v11_annotationen_merged/train/annotations.json
+label_mapping_path: configs/data/label_maps/infra_hafen_to_mvp5.yaml
+native_categories: [Spalling, Crack, Efflorescence]

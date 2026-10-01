@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+runs/
+results/
+wandb/
+data/processed/
+viz/
+deploy/
+out/
+*:Zone.Identifier
+*.log
+*.txt
+Ready for review.md
+CLAUDE.md
+PROMPT.md
