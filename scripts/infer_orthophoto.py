@@ -57,6 +57,11 @@ def main() -> None:
     p.add_argument("--only_classes", nargs="+", default=None, metavar="CLASS",
                    help="write outputs for only these of the checkpoint's own classes (validated against "
                         "cfg.data.mvp_classes); not retraining, the model still predicts every class it knows")
+    p.add_argument("--segmentation_format", choices=["rle", "polygon"], default="rle",
+                   help="predictions.coco.json's mask encoding. 'rle' (default, unchanged): compact pycocotools "
+                        "RLE, needs a decoder (e.g. pycocotools) to render. 'polygon': one or more subpixel "
+                        "contour rings per instance (skimage.measure.find_contours) plus a simplified convex-hull "
+                        "'hull' field -- directly drawable in a browser (HTML canvas/SVG) with no decoding library.")
     args = p.parse_args()
 
     cfg = load_experiment_config(args.config)
@@ -125,7 +130,8 @@ def main() -> None:
     if args.preview_max_side and max(h, w) > args.preview_max_side:
         f = args.preview_max_side / max(h, w)
         cv2.imwrite(str(args.output_dir / "overlay_preview.jpg"), cv2.resize(overlay_bgr, (round(w * f), round(h * f)), interpolation=cv2.INTER_AREA))
-    export_coco_predictions(binary, prob_map, classes, 1, w, h, str(args.output_dir / "predictions.coco.json"), min_area=args.min_area)
+    export_coco_predictions(binary, prob_map, classes, 1, w, h, str(args.output_dir / "predictions.coco.json"),
+                            min_area=args.min_area, file_name=args.image.name, segmentation_format=args.segmentation_format)
     share = {c: round(float(binary[i].mean()), 4) for i, c in enumerate(classes)}
     (args.output_dir / "run_info.json").write_text(json.dumps({
         "image": str(args.image), "image_size": [full_w, full_h], "crop_xywh": args.crop, "crop_origin": list(crop_origin),

@@ -21,6 +21,23 @@ def hard_cl_dice(pred_binary: np.ndarray, target_binary: np.ndarray, eps: float 
     return float(2 * t_prec * t_sens / (t_prec + t_sens + eps))
 
 
+def skeleton_length_and_width(binary_mask: np.ndarray) -> tuple[float, float]:
+    """binary_mask: (H, W) bool, one class/one image (GT or prediction). Returns
+    (skeleton_length_px, mean_width_px) via the same skeletonize() hard_cl_dice already uses:
+    length = skeleton foreground pixel count (a standard medial-axis length proxy), width =
+    area / length. For scripts/evaluate.py --tiered_report's Tier 3 thin-class extent metric.
+    Deliberately NOT shared with hard_cl_dice's own internal skeletonize call (that would couple
+    two independently-tested accumulators for a cheap, bounded win) — (0.0, nan) for an empty mask,
+    since width is undefined with no skeleton to divide by."""
+    if binary_mask.sum() == 0:
+        return 0.0, float("nan")
+    skel = skeletonize(binary_mask.astype(bool))
+    length = float(skel.sum())
+    if length == 0:
+        return 0.0, float("nan")
+    return length, float(binary_mask.sum()) / length
+
+
 def boundary_f1(pred_binary: np.ndarray, target_binary: np.ndarray, tolerance_px: int = 2, eps: float = 1e-6) -> float:
     """Boundary F1 with a pixel-distance tolerance: a predicted boundary pixel counts as correct
     if a target boundary pixel lies within `tolerance_px` (dilated boundary overlap), and vice

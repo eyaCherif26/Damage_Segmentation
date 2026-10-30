@@ -29,7 +29,9 @@ from data.validity_mask import no_data_validity_mask, training_validity_mask
 from inference.sliding_window import run_tiled_inference
 from metrics.boundary_metrics import boundary_f1, hard_cl_dice
 from metrics.instance_metrics import SIZE_BUCKETS, size_bucketed_detection_rate
+from metrics.presence_metrics import PresenceMetricAccumulator
 from metrics.pixel_metrics import PixelMetricAccumulator, ThresholdSweepAccumulator
+from metrics.tiered_metrics import TieredAccumulator
 
 
 def parse_json_with_helpful_error(path: Path) -> Any:
@@ -122,14 +124,14 @@ def _predict(
 @torch.no_grad()
 def select_thresholds_on_val(
     model: torch.nn.Module, val_loader: DataLoader, class_names: list[str], device: torch.device, amp: bool = True,
-    channel_indices: list[int] | None = None,
+    channel_indices: list[int] | None = None, beta: float = 1.0,
 ) -> dict[str, dict[str, float]]:
     model.eval()
     sweep = ThresholdSweepAccumulator(class_names)
     for batch in val_loader:
         probs, target, validity = _predict(model, batch, device, amp, channel_indices)
         sweep.update(probs, target, validity)
-    return sweep.best_thresholds()
+    return sweep.best_thresholds(beta=beta)
 
 
 class _PerImageMetrics:
@@ -176,7 +178,13 @@ def evaluate_split(
     amp: bool = True,
     channel_indices: list[int] | None = None,
     instance_iou_threshold: float = 0.5,
+    presence: PresenceMetricAccumulator | None = None,
+    tiered: TieredAccumulator | None = None,
 ) -> dict[str, Any]:
+    """`presence`/`tiered`, if given, are updated alongside `per_image` from the exact same
+    already-computed (pred_bin, gt_bin) arrays — see metrics/presence_metrics.py,
+    metrics/tiered_metrics.py. Purely additive: omit them (the default) and nothing about this
+    function's existing behavior/return value changes at all."""
     model.eval()
     thr = torch.tensor([thresholds[c] for c in class_names], device=device)
     overall = PixelMetricAccumulator(class_names, threshold=thr)
@@ -195,6 +203,10 @@ def evaluate_split(
         gt_bin = (target * validity).bool().cpu().numpy()
         for i in range(pred_bin.shape[0]):
             per_image.update(pred_bin[i], gt_bin[i])
+            if presence is not None:
+                presence.update(pred_bin[i], gt_bin[i])
+            if tiered is not None:
+                tiered.update(pred_bin[i], gt_bin[i])
 
     return {"overall": overall.compute(), "per_source": {s: a.compute() for s, a in per_source.items()}, "per_image": per_image}
 
@@ -262,6 +274,8 @@ def evaluate_external_with_tiled_inference(
     channel_indices: list[int] | None = None,
     image_ids: list | None = None,
     instance_iou_threshold: float = 0.5,
+    presence: PresenceMetricAccumulator | None = None,
+    tiered: TieredAccumulator | None = None,
 ) -> dict[str, Any]:
     """Like evaluate_split, but scores each image via a single stitched full-resolution
     probability map from sliding-window inference (see _iter_tiled_predictions), instead of the
@@ -273,6 +287,9 @@ def evaluate_external_with_tiled_inference(
     `batch_size` instead controls how many TILES of one image go through the model per forward
     pass, same meaning as in run_tiled_inference/infer_orthophoto.py). `image_ids`, if given,
     scores only those images (e.g. a held-out reporting split — see select_thresholds_with_tiled_inference).
+    `presence`/`tiered`, if given, are updated alongside the per-image accumulator — see
+    evaluate_split, metrics/presence_metrics.py, metrics/tiered_metrics.py. Purely additive: omit
+    them and nothing else changes.
     """
     thr = torch.tensor([thresholds[c] for c in class_names])
     overall = PixelMetricAccumulator(class_names, threshold=thr)
@@ -285,6 +302,10 @@ def evaluate_external_with_tiled_inference(
         pred_bin = ((probs_t >= thr.view(1, -1, 1, 1)).float() * validity_t).bool().numpy()[0]
         gt_bin = (target_t * validity_t).bool().numpy()[0]
         per_image.update(pred_bin, gt_bin)
+        if presence is not None:
+            presence.update(pred_bin, gt_bin)
+        if tiered is not None:
+            tiered.update(pred_bin, gt_bin)
 
     return {"overall": overall.compute(), "per_source": {dataset.source_name: overall.compute()}, "per_image": per_image}
 
@@ -301,6 +322,7 @@ def select_thresholds_with_tiled_inference(
     allow_large_memory: bool = False,
     channel_indices: list[int] | None = None,
     image_ids: list | None = None,
+    beta: float = 1.0,
 ) -> dict[str, dict[str, float]]:
     """Like select_thresholds_on_val, but sweeps thresholds using sliding-window tiled inference's
     full-resolution probability maps (see _iter_tiled_predictions) instead of fixed-size batches —
@@ -312,7 +334,7 @@ def select_thresholds_with_tiled_inference(
         model, dataset, tile_size, overlap, batch_size, device, max_memory_gb, allow_large_memory, channel_indices, image_ids
     ):
         sweep.update(probs_t, target_t, validity_t)
-    return sweep.best_thresholds()
+    return sweep.best_thresholds(beta=beta)
 
 
 def split_images_for_calibration(image_ids: list, calibration_fraction: float, seed: int) -> tuple[set, set]:
@@ -366,6 +388,22 @@ def results_to_dataframe(result: dict[str, Any], class_names: list[str], thresho
                          "iou": m["iou"], "dice": m["dice"], "precision": m["precision"], "recall": m["recall"], "gt_pixels": m["gt_pixels"]})
         for agg in ("macro", "frequency_weighted"):
             rows.append({"split": split, "scope": f"source:{src}", "class": agg, **{k: res[agg][k] for k in ("iou", "dice", "precision", "recall")}})
+    return pd.DataFrame(rows)
+
+
+def presence_results_to_dataframe(result: dict, class_names: list[str], split: str) -> pd.DataFrame:
+    """A separate table from results_to_dataframe — never merged into it, so nothing already
+    parsing results_*.csv's existing columns is affected by this. One row per class plus a final
+    `__summary__` row carrying `exact_match_ratio`/`hamming_accuracy` (dataset-wide, not per-class,
+    so they only make sense once)."""
+    rows = []
+    for name in class_names:
+        m = result["per_class"][name]
+        rows.append({"split": split, "class": name, **m})
+    rows.append({
+        "split": split, "class": "__summary__", "n_images_with_gt": result["n_images"],
+        "exact_match_ratio": result["exact_match_ratio"], "hamming_accuracy": result["hamming_accuracy"],
+    })
     return pd.DataFrame(rows)
 
 

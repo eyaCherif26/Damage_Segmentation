@@ -16,22 +16,32 @@ from configs.schema import WandbConfig
 
 
 class WandbLogger:
-    def __init__(self, cfg: WandbConfig, run_name: str, config_dict: dict[str, Any]) -> None:
+    def __init__(self, cfg: WandbConfig, run_name: str, config_dict: dict[str, Any], resume_id: str | None = None) -> None:
+        """`resume_id`, if given (Trainer resuming from a checkpoint that recorded one), continues
+        logging onto that SAME W&B run (same curve, same step axis) instead of starting a new one —
+        passed as both `id=` and `resume="allow"` to `wandb.init`, the documented way to append to an
+        existing run. `self.run_id` is then saved into every checkpoint so a later resume can do this
+        again; it stays None when W&B is disabled, exactly like `self.run`."""
         self.cfg = cfg
         self.enabled = cfg.mode != "disabled"
         self.run = None
+        self.run_id: str | None = None
         if self.enabled:
             cfg.validate_ready()
             import wandb
 
             self._wandb = wandb
-            self.run = wandb.init(
+            init_kwargs: dict[str, Any] = dict(
                 entity=cfg.entity,
                 project=cfg.project,
                 name=cfg.run_name or run_name,
                 config=config_dict,
                 mode=cfg.mode,
             )
+            if resume_id is not None:
+                init_kwargs.update(id=resume_id, resume="allow")
+            self.run = wandb.init(**init_kwargs)
+            self.run_id = self.run.id
 
     def log_epoch(self, epoch: int, metrics: dict[str, float]) -> None:
         if self.enabled:

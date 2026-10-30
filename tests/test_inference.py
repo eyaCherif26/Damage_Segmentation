@@ -82,3 +82,52 @@ def test_export_coco_filters_small_components_and_encodes_rle(tmp_path):
     from pycocotools import mask as mu
 
     assert mu.decode({"size": a["segmentation"]["size"], "counts": a["segmentation"]["counts"].encode()}).sum() == 600
+
+
+def test_export_coco_file_name_is_omitted_by_default_and_recorded_when_given(tmp_path):
+    classes = ["Cracks"]
+    prob = np.zeros((1, 20, 20), np.float32)
+    prob[0, 5:10, 5:10] = 0.9
+    binm = apply_thresholds(prob, classes, {"Cracks": 0.5})
+    import json
+
+    out1 = tmp_path / "no_name.json"
+    export_coco_predictions(binm, prob, classes, 1, 20, 20, str(out1), min_area=1)
+    assert "file_name" not in json.loads(out1.read_text())["images"][0]
+
+    out2 = tmp_path / "with_name.json"
+    export_coco_predictions(binm, prob, classes, 1, 20, 20, str(out2), min_area=1, file_name="tile_007.png")
+    assert json.loads(out2.read_text())["images"][0]["file_name"] == "tile_007.png"
+
+
+def test_export_coco_polygon_format_is_browser_renderable_with_correct_area_and_hull(tmp_path):
+    """segmentation_format='polygon' must give plain coordinate lists (not an RLE dict) that
+    actually enclose the right area -- not just 'doesn't crash' -- plus a convex-hull 'hull' field."""
+    classes = ["Cracks"]
+    prob = np.zeros((1, 100, 120), np.float32)
+    prob[0, 10:30, 10:40] = 0.9  # a 20x30 rectangle, area 600 (same shape as the RLE test above)
+    binm = apply_thresholds(prob, classes, {"Cracks": 0.5})
+    out = tmp_path / "p.json"
+    export_coco_predictions(binm, prob, classes, 1, 120, 100, str(out), min_area=16, segmentation_format="polygon")
+    import json
+
+    d = json.loads(out.read_text())
+    a = d["annotations"][0]
+    assert isinstance(a["segmentation"], list) and isinstance(a["segmentation"][0], list), "plain nested lists, not an RLE dict"
+    assert "hull" in a and isinstance(a["hull"], list) and isinstance(a["hull"][0], list)
+
+    def shoelace_area(ring: list[float]) -> float:
+        xs, ys = ring[0::2], ring[1::2]
+        n = len(xs)
+        return abs(sum(xs[i] * ys[(i + 1) % n] - xs[(i + 1) % n] * ys[i] for i in range(n))) / 2
+
+    total_area = sum(shoelace_area(ring) for ring in a["segmentation"])
+    assert total_area == pytest.approx(600, rel=0.05), "the polygon ring(s) must actually enclose ~600px, not just exist"
+
+
+def test_export_coco_rejects_an_unknown_segmentation_format(tmp_path):
+    classes = ["Cracks"]
+    prob = np.zeros((1, 20, 20), np.float32)
+    binm = apply_thresholds(prob, classes, {"Cracks": 0.5})
+    with pytest.raises(ValueError, match="segmentation_format"):
+        export_coco_predictions(binm, prob, classes, 1, 20, 20, str(tmp_path / "p.json"), segmentation_format="svg")

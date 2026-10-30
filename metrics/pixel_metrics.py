@@ -118,21 +118,43 @@ class ThresholdSweepAccumulator:
             self.fp[i] += (preds * (1 - target)).sum(dims).double().cpu()
             self.fn[i] += ((1 - preds) * target).sum(dims).double().cpu()
 
-    def dice_table(self, eps: float = 1e-6) -> np.ndarray:
-        """(num_thresholds, num_classes) Dice at each candidate threshold."""
-        return (2 * self.tp / (2 * self.tp + self.fp + self.fn + eps)).numpy()
+    def fbeta_table(self, beta: float = 1.0, eps: float = 1e-6) -> np.ndarray:
+        """(num_thresholds, num_classes) F-beta at each candidate threshold:
+        F_beta = (1+beta^2)*tp / ((1+beta^2)*tp + beta^2*fn + fp). beta=1 is exactly Dice/F1 (equal
+        precision/recall weight); beta=2 (F2) weights recall twice as heavily as precision —
+        appropriate when missing a real defect (FN) matters more than an extra false alarm (FP)."""
+        b2 = beta * beta
+        return (((1 + b2) * self.tp) / ((1 + b2) * self.tp + b2 * self.fn + self.fp + eps)).numpy()
 
-    def best_thresholds(self, default: float = 0.5) -> dict[str, dict[str, float]]:
-        """Per class: the Dice-maximizing threshold and its Dice. Classes with no GT pixels in the
-        sweep data can't be tuned, so they fall back to `default` (and report NaN Dice)."""
-        table = self.dice_table()
+    def dice_table(self, eps: float = 1e-6) -> np.ndarray:
+        """(num_thresholds, num_classes) Dice (== F1) at each candidate threshold."""
+        return self.fbeta_table(beta=1.0, eps=eps)
+
+    def best_thresholds(self, default: float = 0.5, beta: float = 1.0) -> dict[str, dict[str, float]]:
+        """Per class: the threshold maximizing F-beta (default beta=1.0, i.e. Dice/F1 — identical to
+        this method's behavior before `beta` existed). beta=2.0 picks a recall-weighted (F2) threshold
+        instead, typically lower, trading extra false positives for fewer missed defects. Classes with
+        no GT pixels in the sweep data can't be tuned, so they fall back to `default` (and report NaN).
+
+        The returned dict always carries "val_dice" (the actual Dice/F1 at the chosen threshold, so
+        every existing thresholds.json reader keeps working unchanged); when beta != 1.0 it also
+        carries e.g. "val_f2" with the F-beta score that was actually used to pick the threshold."""
+        score_table = self.fbeta_table(beta)
+        dice_table = score_table if beta == 1.0 else self.dice_table()
+        score_key = f"val_f{beta:g}"
         out = {}
         for c, name in enumerate(self.class_names):
             if self.gt_pixels[c] == 0:
-                out[name] = {"threshold": default, "val_dice": float("nan")}
+                entry = {"threshold": default, "val_dice": float("nan")}
+                if beta != 1.0:
+                    entry[score_key] = float("nan")
+                out[name] = entry
                 continue
-            k = int(np.argmax(table[:, c]))
-            out[name] = {"threshold": float(self.thresholds[k]), "val_dice": float(table[k, c])}
+            k = int(np.argmax(score_table[:, c]))
+            entry = {"threshold": float(self.thresholds[k]), "val_dice": float(dice_table[k, c])}
+            if beta != 1.0:
+                entry[score_key] = float(score_table[k, c])
+            out[name] = entry
         return out
 
 

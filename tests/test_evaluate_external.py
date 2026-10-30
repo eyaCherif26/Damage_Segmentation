@@ -411,3 +411,116 @@ def test_detection_iou_threshold_is_accepted_and_runs(checkpoint, results_dir, t
     proc = _run(checkpoint, results_dir, "--coco", ann, "--images", images, "--name", "harbor", "--detection_iou_threshold", "0.1")
     assert proc.returncode == 0, proc.stderr[-3000:]
     assert (results_dir / "results_harbor.csv").exists()
+
+
+# ---------------------------------------------------------------------- --presence_report
+
+def test_presence_report_is_off_by_default_and_existing_output_is_unaffected(checkpoint, results_dir, tmp_path):
+    """The plan's own stated verification step: running with and without --presence_report must
+    produce byte-identical results_<name>.csv/thresholds files — this is purely additive."""
+    ann, images = _make_dataset(tmp_path / "data", ("Cracks", "Rust"))
+    out_without, out_with = tmp_path / "without", tmp_path / "with"
+    for out in (out_without, out_with):
+        out.mkdir()
+        (out / "thresholds.json").write_text((results_dir / "thresholds.json").read_text())
+
+    proc1 = _run(checkpoint, out_without, "--coco", ann, "--images", images, "--name", "harbor")
+    assert proc1.returncode == 0, proc1.stderr[-3000:]
+    assert not list(out_without.glob("*_presence.csv")), "no --presence_report given -> no presence file at all"
+
+    proc2 = _run(checkpoint, out_with, "--coco", ann, "--images", images, "--name", "harbor", "--presence_report")
+    assert proc2.returncode == 0, proc2.stderr[-3000:]
+    assert (out_with / "results_harbor_presence.csv").exists()
+    assert (out_without / "results_harbor.csv").read_bytes() == (out_with / "results_harbor.csv").read_bytes(), \
+        "the EXISTING output must be byte-identical whether or not --presence_report was passed"
+
+
+def test_presence_report_writes_sane_per_class_and_summary_values(checkpoint, results_dir, tmp_path):
+    ann, images = _make_dataset(tmp_path / "data", ("Cracks", "Rust"))
+    proc = _run(checkpoint, results_dir, "--coco", ann, "--images", images, "--name", "harbor", "--presence_report")
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert "presence (image-level, not pixel-level): exact_match_ratio=" in proc.stdout
+
+    df = pd.read_csv(results_dir / "results_harbor_presence.csv")
+    assert set(df["class"]) == {"Cracks", "Wetspot", "Spalling", "Rust", "Efflorescence", "__summary__"}
+    cracks = df[df["class"] == "Cracks"].iloc[0]
+    assert cracks["n_images_with_gt"] == 2, "both synthetic images in _make_dataset contain a Cracks box"
+    assert 0.0 <= cracks["recall_presence"] <= 1.0
+    summary = df[df["class"] == "__summary__"].iloc[0]
+    assert summary["n_images_with_gt"] == 2  # n_images, reused in that column for the summary row
+    assert 0.0 <= summary["exact_match_ratio"] <= 1.0
+    assert 0.0 <= summary["hamming_accuracy"] <= 1.0
+
+
+def test_presence_report_works_through_the_tiled_sliding_window_path(checkpoint_native, results_dir, tmp_path):
+    ann, images = _make_large_dataset(tmp_path / "data", ("Cracks", "Rust"))
+    proc = _run_native(checkpoint_native, results_dir, "--coco", ann, "--images", images, "--name", "big_harbor", "--presence_report")
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert (results_dir / "results_big_harbor_presence.csv").exists()
+
+
+def test_tiered_report_is_off_by_default_and_existing_output_is_unaffected(checkpoint, results_dir, tmp_path):
+    """Mirrors the --presence_report regression guard: with and without --tiered_report must
+    produce byte-identical results_<name>.csv/thresholds files."""
+    ann, images = _make_dataset(tmp_path / "data", ("Cracks", "Rust"))
+    out_without, out_with = tmp_path / "without", tmp_path / "with"
+    for out in (out_without, out_with):
+        out.mkdir()
+        (out / "thresholds.json").write_text((results_dir / "thresholds.json").read_text())
+
+    proc1 = _run(checkpoint, out_without, "--coco", ann, "--images", images, "--name", "harbor")
+    assert proc1.returncode == 0, proc1.stderr[-3000:]
+    assert not list(out_without.glob("*_tiered.csv")), "no --tiered_report given -> no tiered file at all"
+
+    proc2 = _run(checkpoint, out_with, "--coco", ann, "--images", images, "--name", "harbor",
+                 "--tiered_report", "--tier_buffer_px", "2", "--tier_min_gt_px", "5", "--tier_min_pred_px", "5")
+    assert proc2.returncode == 0, proc2.stderr[-3000:]
+    assert (out_with / "results_harbor_tiered.csv").exists()
+    assert (out_without / "results_harbor.csv").read_bytes() == (out_with / "results_harbor.csv").read_bytes(), \
+        "the EXISTING output must be byte-identical whether or not --tiered_report was passed"
+
+
+def test_tiered_report_requires_explicit_tier_flags(checkpoint, results_dir, tmp_path):
+    ann, images = _make_dataset(tmp_path / "data", ("Cracks", "Rust"))
+    proc = _run(checkpoint, results_dir, "--coco", ann, "--images", images, "--name", "harbor", "--tiered_report")
+    assert proc.returncode != 0
+    assert "--tier_buffer_px" in proc.stderr and "--tier_min_gt_px" in proc.stderr and "--tier_min_pred_px" in proc.stderr
+    assert not list(results_dir.glob("*_tiered.csv"))
+
+
+def test_tier_flags_without_tiered_report_are_rejected(checkpoint, results_dir, tmp_path):
+    ann, images = _make_dataset(tmp_path / "data", ("Cracks", "Rust"))
+    proc = _run(checkpoint, results_dir, "--coco", ann, "--images", images, "--name", "harbor", "--tier_buffer_px", "2")
+    assert proc.returncode != 0 and "only apply together with --tiered_report" in proc.stderr
+
+
+def test_tiered_report_writes_sane_values_and_reuses_pixel_dice(checkpoint, results_dir, tmp_path):
+    ann, images = _make_dataset(tmp_path / "data", ("Cracks", "Rust"))
+    proc = _run(checkpoint, results_dir, "--coco", ann, "--images", images, "--name", "harbor",
+                "--tiered_report", "--tier_buffer_px", "2", "--tier_min_gt_px", "1", "--tier_min_pred_px", "1")
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert "tiered (detection/localization/extent): wrote results_harbor_tiered.csv" in proc.stdout
+
+    tiered = pd.read_csv(results_dir / "results_harbor_tiered.csv")
+    assert set(tiered["class"]) == {"Cracks", "Wetspot", "Spalling", "Rust", "Efflorescence",
+                                     "__summary_image__", "__summary_tile__"}
+    per_class = tiered[tiered["class"].isin(CLASSES)]
+    for col in ("image_recall", "image_precision", "tile_recall", "tile_precision", "buffered_precision", "buffered_recall"):
+        vals = per_class[col].dropna()
+        assert ((vals >= 0.0) & (vals <= 1.0)).all(), f"{col} out of [0,1] range"
+
+    main = pd.read_csv(results_dir / "results_harbor.csv")
+    main_overall = main[main.scope == "overall"].set_index("class")
+    tiered_by_class = tiered.set_index("class")
+    for name in CLASSES:
+        assert tiered_by_class.loc[name, "dice"] == pytest.approx(main_overall.loc[name, "dice"]), \
+            "Tier 3 Dice must be the SAME number already in results_<name>.csv, not recomputed"
+        assert tiered_by_class.loc[name, "iou"] == pytest.approx(main_overall.loc[name, "iou"])
+
+
+def test_tiered_report_works_through_the_tiled_sliding_window_path(checkpoint_native, results_dir, tmp_path):
+    ann, images = _make_large_dataset(tmp_path / "data", ("Cracks", "Rust"))
+    proc = _run_native(checkpoint_native, results_dir, "--coco", ann, "--images", images, "--name", "big_harbor",
+                        "--tiered_report", "--tier_buffer_px", "2", "--tier_min_gt_px", "5", "--tier_min_pred_px", "5")
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert (results_dir / "results_big_harbor_tiered.csv").exists()

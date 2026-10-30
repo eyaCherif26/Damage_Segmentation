@@ -66,7 +66,7 @@ def test_predict_uses_the_bundled_thresholds_by_default(bundle, scene, tmp_path)
     proc = _run(PREDICT_SCRIPT, "--bundle", bundle, "--image", scene, "--output_dir", out)
     assert proc.returncode == 0, proc.stderr[-2000:]
     coco = json.loads((out / "predictions.coco.json").read_text())
-    assert coco["images"] == [{"id": 1, "width": 800, "height": 600}]
+    assert coco["images"] == [{"id": 1, "width": 800, "height": 600, "file_name": "scene.png"}]
     assert {c["name"] for c in coco["categories"]} == set(CLASSES)
     assert "thresholds from" in proc.stdout and str(bundle / "thresholds.json") in proc.stdout
 
