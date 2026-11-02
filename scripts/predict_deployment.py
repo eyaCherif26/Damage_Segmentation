@@ -117,6 +117,10 @@ def main() -> None:
     p.add_argument("--only_classes", nargs="+", default=None, metavar="CLASS",
                    help="write outputs for only these of the bundle's own classes (not retraining — the model "
                         "still predicts every class it knows)")
+    p.add_argument("--segmentation_format", choices=["rle", "polygon"], default="rle",
+                   help="predictions.coco.json's mask encoding. 'rle' (default, unchanged): compact pycocotools "
+                        "RLE, needs a decoder to render. 'polygon': subpixel contour rings per instance plus a "
+                        "simplified convex-hull 'hull' field -- directly drawable in a browser, no decoder needed.")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -161,7 +165,8 @@ def main() -> None:
     binary = apply_thresholds(prob_map, classes, thresholds)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    export_coco_predictions(binary, prob_map, classes, 1, w, h, str(args.output_dir / "predictions.coco.json"), min_area=args.min_area)
+    export_coco_predictions(binary, prob_map, classes, 1, w, h, str(args.output_dir / "predictions.coco.json"),
+                            min_area=args.min_area, file_name=args.image.name, segmentation_format=args.segmentation_format)
     share = {c: round(float(binary[i].mean()), 4) for i, c in enumerate(classes)}
     print(f"[predict] wrote {args.output_dir / 'predictions.coco.json'}; predicted pixel share per class: {share}")
 

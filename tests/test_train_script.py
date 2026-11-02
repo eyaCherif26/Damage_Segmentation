@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import torch
 import yaml
 
 REPO = Path(__file__).resolve().parent.parent
@@ -69,3 +70,52 @@ def test_lr_flags_below_min_lr_are_rejected_before_any_training_io(tmp_path):
     proc = _run(tmp_path, "--lr_backbone", "0.000005")
     assert proc.returncode != 0 and "min_lr" in proc.stderr
     assert not (tmp_path / "baseline_smp_efficientnet_b0").exists()
+
+
+def test_resume_flag_errors_when_no_checkpoint_exists_yet(tmp_path):
+    proc = _run(tmp_path, "--resume")
+    assert proc.returncode != 0 and "no checkpoint found" in proc.stderr
+
+
+def test_resume_and_resume_from_are_mutually_exclusive(tmp_path):
+    proc = _run(tmp_path, "--resume", "--resume_from", str(tmp_path / "x.pt"))
+    assert proc.returncode != 0 and "mutually exclusive" in proc.stderr
+
+
+def test_resume_from_a_nonexistent_explicit_path_is_rejected(tmp_path):
+    proc = _run(tmp_path, "--resume_from", str(tmp_path / "nope.pt"))
+    assert proc.returncode != 0 and "does not exist" in proc.stderr
+
+
+def test_resume_continues_training_from_the_next_epoch_without_rerunning_completed_ones(tmp_path):
+    first = _run(tmp_path, "--max_epochs", "2")
+    assert first.returncode == 0, first.stderr[-3000:]
+    ckpt_dir = tmp_path / "baseline_smp_efficientnet_b0"
+    state = torch.load(ckpt_dir / "last.pt", map_location="cpu", weights_only=False)
+    assert state["epoch"] == 1  # 0-indexed: epochs 0 and 1 both ran
+    assert "scaler_state_dict" in state and "early_stopping_state" in state
+
+    second = _run(tmp_path, "--max_epochs", "3", "--resume")
+    assert second.returncode == 0, second.stderr[-3000:]
+    assert "continuing from epoch 2" in second.stdout
+    assert "[epoch 0]" not in second.stdout and "[epoch 1]" not in second.stdout, "must not re-run already-completed epochs"
+    assert "[epoch 2]" in second.stdout
+    state2 = torch.load(ckpt_dir / "last.pt", map_location="cpu", weights_only=False)
+    assert state2["epoch"] == 2
+
+
+def test_resume_with_a_changed_max_epochs_warns_about_the_lr_schedule(tmp_path):
+    first = _run(tmp_path, "--max_epochs", "1")
+    assert first.returncode == 0, first.stderr[-3000:]
+    second = _run(tmp_path, "--max_epochs", "5", "--resume")
+    assert second.returncode == 0, second.stderr[-3000:]
+    assert "max_epochs=5" in second.stdout and "max_epochs=1" in second.stdout
+
+
+def test_resume_when_already_at_max_epochs_is_a_safe_no_op(tmp_path):
+    first = _run(tmp_path, "--max_epochs", "1")
+    assert first.returncode == 0, first.stderr[-3000:]
+    second = _run(tmp_path, "--max_epochs", "1", "--resume")
+    assert second.returncode == 0, second.stderr[-3000:]
+    assert "already reached" in second.stdout
+    assert "[epoch 0]" not in second.stdout

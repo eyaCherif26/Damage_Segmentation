@@ -51,7 +51,21 @@ def main() -> None:
                         "shared rate is often preferable; this is the CLI shortcut for it.")
     p.add_argument("--lr_head", type=float, default=None)
     p.add_argument("--lr_backbone", type=float, default=None)
+    p.add_argument("--resume", action="store_true",
+                   help="Resume training from <checkpoint_dir>/<name>/last.pt (model, optimizer, scheduler, AMP "
+                        "scaler, early-stopping counters, best-checkpoint bookkeeping, and — if that run had W&B "
+                        "enabled — the SAME W&B run, continuing its curve instead of starting a new one). Training "
+                        "continues from the epoch after the one that checkpoint recorded, up through the SAME "
+                        "--max_epochs ceiling as the original run (not an additional --max_epochs on top). For "
+                        "surviving an interrupted run (crash, preemption, manual stop) without losing the "
+                        "already-completed epochs. Errors if no checkpoint exists yet at that path.")
+    p.add_argument("--resume_from", type=Path, default=None,
+                   help="Like --resume, but from an explicit checkpoint path instead of the default last.pt — e.g. "
+                        "to resume from best.pt, or a checkpoint copied in from elsewhere. Mutually exclusive with --resume.")
     args = p.parse_args()
+    if args.resume and args.resume_from is not None:
+        p.error("--resume and --resume_from are mutually exclusive — --resume always means last.pt, "
+                "--resume_from names the file explicitly")
 
     cfg = load_experiment_config(args.config)
     if args.classes:
@@ -82,7 +96,15 @@ def main() -> None:
     if args.checkpoint_dir:
         cfg.training.checkpoint_dir = args.checkpoint_dir
 
-    trainer = Trainer(cfg, max_train_images=args.max_train_images, max_val_images=args.max_val_images)
+    resume_from = args.resume_from
+    if args.resume:
+        resume_from = Path(cfg.training.checkpoint_dir) / cfg.name / "last.pt"
+        if not resume_from.exists():
+            p.error(f"--resume: no checkpoint found at {resume_from}")
+    elif resume_from is not None and not resume_from.exists():
+        p.error(f"--resume_from {resume_from} does not exist")
+
+    trainer = Trainer(cfg, max_train_images=args.max_train_images, max_val_images=args.max_val_images, resume_from=resume_from)
     trainer.train()
 
 

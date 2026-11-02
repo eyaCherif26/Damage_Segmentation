@@ -49,12 +49,33 @@ class Trainer:
         cfg: ExperimentConfig,
         max_train_images: int | None = None,
         max_val_images: int | None = None,
+        resume_from: Path | None = None,
     ) -> None:
         """`max_*_images` are for smoke tests only: they take a seeded random subset (not the first
-        N indices, which would be a single source since datasets are concatenated per source)."""
+        N indices, which would be a single source since datasets are concatenated per source).
+
+        `resume_from`, if given, is a checkpoint written by `_save_checkpoint` below (last.pt or
+        best.pt) to continue an interrupted run from: model/optimizer/scheduler/scaler/early-stopping
+        state and the best-checkpoint bookkeeping are all restored, training resumes at the epoch
+        after the one that checkpoint recorded, and (if that run had W&B enabled) logging continues
+        onto the SAME W&B run rather than starting a new one. Only `max_epochs` is cross-checked
+        against the checkpoint's own recorded config (a changed max_epochs would silently desync the
+        cosine LR schedule's restored state) — everything else in `cfg` is trusted as a deliberate
+        choice, same as any other resume-time override."""
         self.cfg = cfg
         set_seed(cfg.seed)
         self.device = torch.device(cfg.training.device if torch.cuda.is_available() else "cpu")
+
+        resume_state = None
+        if resume_from is not None:
+            resume_state = torch.load(resume_from, map_location="cpu", weights_only=False)
+            print(f"[trainer] resuming from {resume_from} (epoch {resume_state['epoch']}, continuing from epoch {resume_state['epoch'] + 1})")
+            old_max_epochs = resume_state["config"]["training"]["max_epochs"]
+            if old_max_epochs != cfg.training.max_epochs:
+                print(f"[trainer] WARNING: resuming with max_epochs={cfg.training.max_epochs}, but this checkpoint was "
+                      f"saved under max_epochs={old_max_epochs} — the restored cosine LR schedule was computed for "
+                      "the OLD value and will not reach its minimum at the new ceiling. Safe to ignore if that's "
+                      "deliberate; otherwise keep max_epochs unchanged across a resume.")
 
         self._validate_datasets()
 
@@ -83,7 +104,9 @@ class Trainer:
         )
 
         self.model = models.build_model(cfg.model)
-        if cfg.model.init_mode == "task_pretrained":
+        if resume_state is not None:
+            self.model.load_state_dict(resume_state["model_state_dict"])
+        elif cfg.model.init_mode == "task_pretrained":
             init_report = apply_init_mode(self.model, cfg.model)
             print(f"[init] task_pretrained load report: {init_report}")
         self.model.to(self.device)
@@ -99,13 +122,19 @@ class Trainer:
             build_param_groups(self.model, backbone_params, head_params, cfg.training.lr_backbone,
                                cfg.training.lr_head, cfg.training.weight_decay),
         )
+        if resume_state is not None:
+            self.optimizer.load_state_dict(resume_state["optimizer_state_dict"])
         self._all_trainable_params = [p for group in self.optimizer.param_groups for p in group["params"]]
         steps_per_epoch = max(1, len(self.train_loader) // cfg.training.grad_accum_steps)
         self.scheduler = build_warmup_cosine_scheduler(
             self.optimizer, cfg.training.warmup_epochs, cfg.training.max_epochs, steps_per_epoch, cfg.training.min_lr
         )
+        if resume_state is not None:
+            self.scheduler.load_state_dict(resume_state["scheduler_state_dict"])
 
         self.early_stopping = EarlyStopping(cfg.training.early_stopping_patience, cfg.training.early_stopping_min_delta, mode="max")
+        if resume_state is not None and "early_stopping_state" in resume_state:
+            self.early_stopping.load_state_dict(resume_state["early_stopping_state"])
 
         bf16_supported = self.device.type == "cuda" and torch.cuda.is_bf16_supported()
         amp_settings = resolve_amp(cfg.training.amp, cfg.training.amp_dtype, self.device.type, bf16_supported)
@@ -113,7 +142,10 @@ class Trainer:
         if amp_settings.warning:
             print(f"[trainer] WARNING: {amp_settings.warning}", flush=True)
         self.scaler = torch.amp.GradScaler(enabled=amp_settings.scaler_enabled)
-        self.wandb_logger = WandbLogger(cfg.wandb, cfg.name, config_to_dict(cfg))
+        if resume_state is not None and "scaler_state_dict" in resume_state:
+            self.scaler.load_state_dict(resume_state["scaler_state_dict"])
+        resume_wandb_id = resume_state.get("wandb_run_id") if resume_state is not None else None
+        self.wandb_logger = WandbLogger(cfg.wandb, cfg.name, config_to_dict(cfg), resume_id=resume_wandb_id)
 
         self.checkpoint_dir = Path(cfg.training.checkpoint_dir) / cfg.name
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -125,6 +157,15 @@ class Trainer:
         self._consecutive_nonfinite_batches = 0  # persists across epochs; see _run_epoch's finite-loss guard
         self._best_epoch: int | None = None
         self._best_monitor_value: float | None = None
+        self._start_epoch = 0
+        if resume_state is not None:
+            self._start_epoch = resume_state["epoch"] + 1
+            self._best_epoch = resume_state.get("best_epoch")
+            self._best_monitor_value = resume_state.get("best_monitor_value")
+            # train()'s per-epoch freeze check (epoch >= frozen_epochs) still runs on the very first
+            # resumed iteration before any forward pass, so it self-corrects immediately if the freeze
+            # period had already ended before the crash — no extra handling needed here beyond leaving
+            # _backbone_frozen at its normal frozen_epochs>0 default set just above.
 
     def _validate_datasets(self) -> None:
         for source_name, source_cfg in self.cfg.data.sources_resolved.items():
@@ -150,7 +191,10 @@ class Trainer:
         self._backbone_frozen = frozen
 
     def train(self) -> None:
-        for epoch in range(self.cfg.training.max_epochs):
+        if self._start_epoch >= self.cfg.training.max_epochs:
+            print(f"[trainer] resumed at epoch {self._start_epoch}, but max_epochs={self.cfg.training.max_epochs} "
+                  "is already reached — nothing to train. Raise --max_epochs to continue further.")
+        for epoch in range(self._start_epoch, self.cfg.training.max_epochs):
             if self._backbone_frozen and epoch >= self.cfg.training.frozen_epochs:
                 self._set_backbone_frozen(False)
                 print(f"[epoch {epoch}] backbone unfrozen")
@@ -183,9 +227,10 @@ class Trainer:
 
             monitor = log_dict["val/macro_dice"] if self.cfg.training.early_stopping_metric == "val_macro_dice" else -val_metrics["loss"]
             is_best = self.early_stopping.step(monitor)
-            self._save_checkpoint(epoch, is_best)
             if is_best:
                 self._best_epoch, self._best_monitor_value = epoch, monitor
+            self._save_checkpoint(epoch, is_best)  # best_epoch/best_monitor_value above must be updated first, so a
+            # checkpoint written this epoch is self-contained for a later --resume (see _save_checkpoint)
             if self.early_stopping.should_stop:
                 print(f"[epoch {epoch}] early stopping triggered (patience={self.cfg.training.early_stopping_patience})")
                 break
@@ -295,6 +340,11 @@ class Trainer:
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
+            "scaler_state_dict": self.scaler.state_dict(),
+            "early_stopping_state": self.early_stopping.state_dict(),
+            "best_epoch": self._best_epoch,
+            "best_monitor_value": self._best_monitor_value,
+            "wandb_run_id": self.wandb_logger.run_id,
             "config": config_to_dict(self.cfg),
         }
         torch.save(state, self.checkpoint_dir / "last.pt")

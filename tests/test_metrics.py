@@ -2,9 +2,11 @@ import pytest
 import numpy as np
 import torch
 
-from metrics.boundary_metrics import boundary_f1, hard_cl_dice
+from metrics.boundary_metrics import boundary_f1, hard_cl_dice, skeleton_length_and_width
 from metrics.instance_metrics import extract_instances, instance_full_mask, size_bucketed_detection_rate
 from metrics.pixel_metrics import DEFAULT_THRESHOLD_GRID, PixelMetricAccumulator, ThresholdSweepAccumulator, sweep_per_class_thresholds
+from metrics.presence_metrics import PresenceMetricAccumulator
+from metrics.tiered_metrics import TieredAccumulator, _distance_near_mask, _iter_tiles
 
 CLASSES = ["Cracks", "Wetspot", "Spalling", "Rust", "Efflorescence"]
 
@@ -122,6 +124,45 @@ def test_widened_grid_finds_a_true_optimum_outside_the_old_005_to_095_range():
     assert new_best["val_dice"] > old_best["val_dice"], "and it's a strictly better fit, not just a different one"
 
 
+def _probs_target_for_fbeta_divergence():
+    """10 GT-positive / 10 GT-negative pixels (4x5), hand-picked so the Dice(F1)-optimal threshold
+    (0.7, fewer false positives) differs from the F2-optimal one (0.3, fewer missed defects):
+    at t=0.3: TP=9 FP=8 FN=1 -> F1=16/24=0.667, F2=45/57=0.789
+    at t=0.7: TP=6 FP=1 FN=4 -> F1=12/17=0.706, F2=30/47=0.638"""
+    flat_target = [1] * 10 + [0] * 10
+    flat_probs = [0.9] * 6 + [0.5] * 3 + [0.1] * 1 + [0.9] * 1 + [0.5] * 7 + [0.1] * 2
+    target = torch.tensor(flat_target, dtype=torch.float32).view(1, 1, 4, 5)
+    probs = torch.tensor(flat_probs, dtype=torch.float32).view(1, 1, 4, 5)
+    return probs, target
+
+
+def test_best_thresholds_defaults_to_dice_f1_unchanged():
+    probs, target = _probs_target_for_fbeta_divergence()
+    sweep = ThresholdSweepAccumulator(["a"], thresholds=np.array([0.3, 0.7]))
+    sweep.update(probs, target)
+    best = sweep.best_thresholds()["a"]
+    assert best["threshold"] == pytest.approx(0.7)
+    assert best["val_dice"] == pytest.approx(12 / 17, abs=1e-4)
+    assert "val_f2" not in best, "beta=1.0 (default) must not add any new key to the output dict"
+
+
+def test_best_thresholds_with_f2_beta_prefers_the_recall_weighted_threshold():
+    probs, target = _probs_target_for_fbeta_divergence()
+    sweep = ThresholdSweepAccumulator(["a"], thresholds=np.array([0.3, 0.7]))
+    sweep.update(probs, target)
+    best = sweep.best_thresholds(beta=2.0)["a"]
+    assert best["threshold"] == pytest.approx(0.3), "F2 should pick the lower, more recall-favoring threshold"
+    assert best["val_f2"] == pytest.approx(45 / 57, abs=1e-4)
+    assert best["val_dice"] == pytest.approx(16 / 24, abs=1e-4), "val_dice always reports the actual Dice at the chosen threshold"
+
+
+def test_fbeta_table_beta_1_matches_dice_table():
+    probs, target = _probs_target_for_fbeta_divergence()
+    sweep = ThresholdSweepAccumulator(["a"], thresholds=np.array([0.3, 0.7]))
+    sweep.update(probs, target)
+    assert np.allclose(sweep.fbeta_table(beta=1.0), sweep.dice_table())
+
+
 def test_hard_cldice_and_boundary_f1_identity_and_disjoint():
     m = np.zeros((50, 50), bool)
     m[10:40, 24:27] = True
@@ -192,3 +233,123 @@ def test_boundary_f1_of_full_image_masks_is_one_not_zero():
     part[8:20, 8:20] = True
     assert boundary_f1(full, part) == 0.0, "full vs. partial: the full mask has no edge to match"
     assert boundary_f1(part, part) == pytest.approx(1.0, abs=1e-4)
+
+
+def test_presence_accumulator_min_area_defaults_are_byte_identical_to_any_based_behavior():
+    classes = ["a", "b"]
+    rng = np.random.default_rng(0)
+    pred = rng.random((2, 2, 6, 6)) > 0.8
+    gt = rng.random((2, 2, 6, 6)) > 0.8
+    default = PresenceMetricAccumulator(classes)
+    explicit = PresenceMetricAccumulator(classes, min_gt_px=1, min_pred_px=1)
+    for i in range(2):
+        default.update(pred[i], gt[i])
+        explicit.update(pred[i], gt[i])
+    np.testing.assert_equal(default.compute(), explicit.compute())
+
+
+def test_presence_min_area_thresholds_filter_small_noise():
+    """A 3-pixel speck (annotation noise or a stray false positive) must not count as 'present'
+    once a real minimum-area floor is set, while it still counts at the (default) 1px floor."""
+    gt = np.zeros((1, 10, 10), bool)
+    pred = np.zeros((1, 10, 10), bool)
+    pred[0, 0, :3] = True  # 3px prediction speck, no GT at all
+    lenient = PresenceMetricAccumulator(["a"])  # default min_pred_px=1
+    lenient.update(pred, gt)
+    assert lenient.compute()["per_class"]["a"]["fp"] == 1, "at the default floor, any nonzero area counts as present"
+
+    strict = PresenceMetricAccumulator(["a"], min_gt_px=1, min_pred_px=10)
+    strict.update(pred, gt)
+    r = strict.compute()["per_class"]["a"]
+    assert r["fp"] == 0 and r["tn"] == 1, "below min_pred_px, the speck is correctly ignored as absent"
+
+
+def test_buffered_precision_recall_hand_computed():
+    """GT = a 2x2 block at rows0-1/cols0-1; prediction = the same block shifted right by 1 column
+    (2 of 4 pixels overlap). At buffer_px=0 the tolerance zone is exactly the mask itself, so
+    precision/recall equal plain overlap (0.5 each). At buffer_px=1 (orthogonal-neighbor radius)
+    every pixel of each mask falls within the other's tolerance zone, so both reach 1.0 — worked
+    by hand in the plan, not just asserted to be 'better'."""
+    gt = np.zeros((1, 4, 4), bool)
+    gt[0, 0:2, 0:2] = True
+    pred = np.zeros((1, 4, 4), bool)
+    pred[0, 0:2, 1:3] = True
+
+    acc0 = TieredAccumulator(["a"], [], buffer_px=0, min_gt_px=1, min_pred_px=1, tile_px=128)
+    acc0.update(pred, gt)
+    t2 = acc0.compute()["tier2"]["a"]
+    assert t2["buffered_precision"] == pytest.approx(0.5) and t2["buffered_recall"] == pytest.approx(0.5)
+
+    acc1 = TieredAccumulator(["a"], [], buffer_px=1, min_gt_px=1, min_pred_px=1, tile_px=128)
+    acc1.update(pred, gt)
+    t2 = acc1.compute()["tier2"]["a"]
+    assert t2["buffered_precision"] == pytest.approx(1.0) and t2["buffered_recall"] == pytest.approx(1.0)
+
+
+def test_tile_level_presence_catches_wrong_corner():
+    """GT present only in the top-left 128px tile; prediction present only in the top-right one.
+    Image-level presence calls this 'detected' (both sides have SOME pixel somewhere) even though
+    the tile-level breakdown shows it's in the wrong place entirely: tp=0, fp=1, fn=1, tn=2 across
+    the image's 4 tiles — exactly what tile-level adds over image-level."""
+    gt = np.zeros((1, 256, 256), bool)
+    gt[0, 0:10, 0:10] = True
+    pred = np.zeros((1, 256, 256), bool)
+    pred[0, 0:10, 138:148] = True  # top-right 128px tile
+
+    acc = TieredAccumulator(["a"], [], buffer_px=1, min_gt_px=1, min_pred_px=1, tile_px=128)
+    acc.update(pred, gt)
+    result = acc.compute()
+    img = result["tier1_image"]["per_class"]["a"]
+    assert img["tp"] == 1, "image-level: both sides have damage somewhere -> counted as detected"
+    tile = result["tier1_tile"]["per_class"]["a"]
+    assert (tile["tp"], tile["fp"], tile["fn"], tile["tn"]) == (0, 1, 1, 2)
+    assert result["tier1_tile"]["n_images"] == 4, "n_images counts TILES here, 4 per 256x256 image at tile_px=128"
+
+
+def test_area_error_and_total_area_ratio_hand_computed():
+    """3 images, GT area 10 each, prediction areas 12/8/20 -> per-image area errors 0.2/0.2/1.0
+    (median 0.2, p90 by linear interpolation = 0.84) and a pooled total_area_ratio of 40/30."""
+    acc = TieredAccumulator(["a"], [], buffer_px=0, min_gt_px=1, min_pred_px=1, tile_px=128)
+    for gt_area, pred_area in [(10, 12), (10, 8), (10, 20)]:
+        gt = np.zeros(100, bool)
+        gt[:gt_area] = True
+        pred = np.zeros(100, bool)
+        pred[:pred_area] = True
+        acc.update(pred.reshape(1, 10, 10), gt.reshape(1, 10, 10))
+    t3 = acc.compute()["tier3"]["a"]
+    assert t3["area_error_median"] == pytest.approx(0.2)
+    assert t3["area_error_p90"] == pytest.approx(0.84)
+    assert t3["total_area_ratio"] == pytest.approx(40 / 30)
+
+
+def test_skeleton_length_and_width_of_a_known_straight_line():
+    mask = np.zeros((20, 30), bool)
+    mask[10, 0:20] = True  # a 1px-thick, 20px-long straight line: already its own skeleton
+    length, width = skeleton_length_and_width(mask)
+    assert length == pytest.approx(20.0)
+    assert width == pytest.approx(1.0)
+
+
+def test_skeleton_length_and_width_of_an_empty_mask_is_nan_width():
+    length, width = skeleton_length_and_width(np.zeros((10, 10), bool))
+    assert length == 0.0 and np.isnan(width)
+
+
+def test_distance_near_mask_matches_hand_computed_buffer_shape():
+    """Single foreground pixel at the center of a 5x5 grid: at buffer_px=1, only the 4 orthogonal
+    neighbors (not the diagonals, Euclidean distance sqrt(2) > 1) plus the pixel itself are 'near'."""
+    binary = np.zeros((5, 5), bool)
+    binary[2, 2] = True
+    near = _distance_near_mask(binary, buffer_px=1)
+    expected = np.zeros((5, 5), bool)
+    for r, c in [(2, 2), (1, 2), (3, 2), (2, 1), (2, 3)]:
+        expected[r, c] = True
+    assert np.array_equal(near, expected)
+    assert not _distance_near_mask(np.zeros((5, 5), bool), buffer_px=5).any(), "nothing is 'near' an all-background mask"
+
+
+def test_iter_tiles_covers_the_whole_image_including_uneven_edge_tiles():
+    arr = np.zeros((2, 10, 7), bool)  # 7 is not a multiple of tile_px=4 -> an uneven edge column of tiles
+    tiles = list(_iter_tiles(arr, tile_px=4))
+    assert sum(t.shape[1] * t.shape[2] for t in tiles) == 10 * 7, "every pixel is covered exactly once, none padded/dropped"
+    assert any(t.shape[2] == 3 for t in tiles), "the uneven edge tile is scored at its real (smaller) size, not padded"

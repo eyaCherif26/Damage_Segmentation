@@ -33,3 +33,11 @@ class EarlyStopping:
             if self.counter >= self.patience:
                 self.should_stop = True
         return is_better
+
+    def state_dict(self) -> dict:
+        return {"best": self.best, "counter": self.counter, "should_stop": self.should_stop}
+
+    def load_state_dict(self, state: dict) -> None:
+        self.best = state["best"]
+        self.counter = state["counter"]
+        self.should_stop = state["should_stop"]

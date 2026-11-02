@@ -286,3 +286,80 @@ def test_evaluate_external_with_tiled_inference_respects_channel_indices(tmp_pat
     )
     assert set(result["overall"]["per_class"]) == {"Cracks", "Spalling"}, "Wetspot must not appear at all when filtered out"
     assert result["overall"]["per_class"]["Cracks"]["iou"] == pytest.approx(1.0, abs=1e-2)
+
+
+# ---------------------------------------------------------------------- PresenceMetricAccumulator
+
+def test_presence_metric_accumulator_matches_hand_computed_values():
+    """3 images, 3 classes (A, B, C), by hand:
+    image1: GT={A,B}, pred={A,C}      -> A: TP, B: FN, C: FP            (not an exact match)
+    image2: GT={C},   pred={C}        -> A: TN, B: TN, C: TP            (exact match)
+    image3: GT={},     pred={}        -> A: TN, B: TN, C: TN            (exact match)
+    """
+    from metrics.presence_metrics import PresenceMetricAccumulator
+
+    def mask(present: set[int]) -> np.ndarray:
+        m = np.zeros((3, 2, 2), dtype=bool)
+        for c in present:
+            m[c, 0, 0] = True
+        return m
+
+    acc = PresenceMetricAccumulator(["A", "B", "C"])
+    acc.update(mask({0, 2}), mask({0, 1}))  # pred={A,C}, gt={A,B}
+    acc.update(mask({2}), mask({2}))        # pred={C}, gt={C}
+    acc.update(mask(set()), mask(set()))    # pred={}, gt={}
+
+    result = acc.compute()
+    assert result["n_images"] == 3
+    assert result["exact_match_ratio"] == pytest.approx(2 / 3)
+    assert result["hamming_accuracy"] == pytest.approx(7 / 9)
+
+    a, b, c = result["per_class"]["A"], result["per_class"]["B"], result["per_class"]["C"]
+    assert (a["tp"], a["fp"], a["fn"], a["tn"]) == (1, 0, 0, 2)
+    assert a["recall_presence"] == pytest.approx(1.0) and a["precision_presence"] == pytest.approx(1.0)
+
+    assert (b["tp"], b["fp"], b["fn"], b["tn"]) == (0, 0, 1, 2)
+    assert b["recall_presence"] == pytest.approx(0.0)
+    assert np.isnan(b["precision_presence"]), "never flagged at all -> precision is undefined (NaN), not 0"
+    assert np.isnan(b["f1_presence"])
+
+    assert (c["tp"], c["fp"], c["fn"], c["tn"]) == (1, 1, 0, 1)
+    assert c["recall_presence"] == pytest.approx(1.0) and c["precision_presence"] == pytest.approx(0.5)
+    assert c["f1_presence"] == pytest.approx(2 / 3)
+
+
+def test_presence_metric_accumulator_class_never_in_gt_gives_nan_recall():
+    from metrics.presence_metrics import PresenceMetricAccumulator
+
+    acc = PresenceMetricAccumulator(["A"])
+    acc.update(np.zeros((1, 2, 2), dtype=bool), np.zeros((1, 2, 2), dtype=bool))
+    result = acc.compute()
+    assert np.isnan(result["per_class"]["A"]["recall_presence"]), "no GT occurrence at all -> NaN, not 0 (matches pixel_metrics.py's convention)"
+
+
+def test_evaluate_split_presence_accumulator_is_purely_additive():
+    """Passing `presence=` must not change evaluate_split's existing return value at all."""
+    from metrics.presence_metrics import PresenceMetricAccumulator
+
+    dev = torch.device("cpu")
+    th = select_thresholds_on_val(OracleModel(), _loader(), CLASSES, dev, amp=False)
+    flat = {c: t["threshold"] for c, t in th.items()}
+    without = evaluate_split(OracleModel(), _loader(), CLASSES, ["Cracks"], flat, dev, amp=False)
+    presence = PresenceMetricAccumulator(CLASSES)
+    with_presence = evaluate_split(OracleModel(), _loader(), CLASSES, ["Cracks"], flat, dev, amp=False, presence=presence)
+    assert without["overall"]["per_class"] == with_presence["overall"]["per_class"]
+    assert presence.compute()["n_images"] == len(ToyDataset())
+
+
+def test_evaluate_split_tiered_accumulator_is_purely_additive():
+    """Passing `tiered=` must not change evaluate_split's existing return value at all."""
+    from metrics.tiered_metrics import TieredAccumulator
+
+    dev = torch.device("cpu")
+    th = select_thresholds_on_val(OracleModel(), _loader(), CLASSES, dev, amp=False)
+    flat = {c: t["threshold"] for c, t in th.items()}
+    without = evaluate_split(OracleModel(), _loader(), CLASSES, ["Cracks"], flat, dev, amp=False)
+    tiered = TieredAccumulator(CLASSES, ["Cracks"], buffer_px=1, min_gt_px=1, min_pred_px=1)
+    with_tiered = evaluate_split(OracleModel(), _loader(), CLASSES, ["Cracks"], flat, dev, amp=False, tiered=tiered)
+    assert without["overall"]["per_class"] == with_tiered["overall"]["per_class"]
+    assert tiered.compute()["tier1_image"]["n_images"] == len(ToyDataset())

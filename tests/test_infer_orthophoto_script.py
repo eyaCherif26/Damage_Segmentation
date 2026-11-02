@@ -59,6 +59,20 @@ def test_full_image_run_writes_all_outputs_and_masks_no_data(checkpoint, ortho, 
     info = json.loads((out / "run_info.json").read_text())
     assert info["scale"] == 0.5 and info["crop_xywh"] is None and info["image_size"] == [900, 700]
     assert set(info["class_colors_rgb"]) == set(info["thresholds"])
+    coco = json.loads((out / "predictions.coco.json").read_text())
+    assert coco["images"][0]["file_name"] == "ortho.png"
+    if coco["annotations"]:
+        assert isinstance(coco["annotations"][0]["segmentation"], dict), "default segmentation_format is still RLE, unchanged"
+
+
+def test_segmentation_format_polygon_gives_browser_renderable_rings(checkpoint, ortho, tmp_path):
+    out = tmp_path / "poly"
+    _run(checkpoint, ortho, out, "--scale", "0.5", "--segmentation_format", "polygon")
+    coco = json.loads((out / "predictions.coco.json").read_text())
+    if coco["annotations"]:
+        a = coco["annotations"][0]
+        assert isinstance(a["segmentation"], list) and isinstance(a["segmentation"][0], list)
+        assert "hull" in a and isinstance(a["hull"], list)
 
 
 def test_crop_processes_only_the_window_and_records_its_origin(checkpoint, ortho, tmp_path):
