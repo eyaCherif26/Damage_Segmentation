@@ -152,8 +152,14 @@ class Trainer:
         with open(self.checkpoint_dir / "resolved_config.yaml", "w") as f:
             yaml.safe_dump(config_to_dict(cfg), f)
 
-        self._backbone_frozen = cfg.training.frozen_epochs > 0
-        self._set_backbone_frozen(self._backbone_frozen)
+        start_epoch = resume_state["epoch"] + 1 if resume_state is not None else 0
+        self._active_freeze_step = None
+        if cfg.training.freeze_schedule is not None:
+            self._validate_freeze_schedule()
+            self._apply_freeze_schedule(start_epoch)
+        else:
+            self._backbone_frozen = cfg.training.frozen_epochs > 0
+            self._set_backbone_frozen(self._backbone_frozen)
         self._consecutive_nonfinite_batches = 0  # persists across epochs; see _run_epoch's finite-loss guard
         self._best_epoch: int | None = None
         self._best_monitor_value: float | None = None
@@ -190,12 +196,47 @@ class Trainer:
             p.requires_grad = not frozen
         self._backbone_frozen = frozen
 
+    def _validate_freeze_schedule(self) -> None:
+        """training.freeze_schedule's tokens are syntax-checked in configs/schema.py; only here is
+        the actual model available to check "stageN" against how many stages it really has."""
+        if not hasattr(self.model, "stage_parameters") or not hasattr(self.model, "num_stages"):
+            raise ValueError(
+                f"training.freeze_schedule is set but model {self.cfg.model.name!r} does not support "
+                "per-stage freezing (only SegFormer does today — see models/segformer_model.py)."
+            )
+        n = self.model.num_stages()
+        valid = {"head"} | {f"stage{i}" for i in range(1, n + 1)}
+        for step in self.cfg.training.freeze_schedule:
+            unknown = [t for t in step.unfrozen if t not in valid]
+            if unknown:
+                raise ValueError(
+                    f"training.freeze_schedule step at epoch={step.epoch} names {unknown}, but "
+                    f"{self.cfg.model.name!r} only has {n} stages; valid tokens are {sorted(valid)}"
+                )
+
+    def _apply_freeze_schedule(self, epoch: int) -> None:
+        step = max((s for s in self.cfg.training.freeze_schedule if s.epoch <= epoch), key=lambda s: s.epoch)
+        if step is self._active_freeze_step:
+            return
+        for p in self.model.head_parameters():
+            p.requires_grad = "head" in step.unfrozen
+        for i in range(1, self.model.num_stages() + 1):
+            for p in self.model.stage_parameters(i):
+                p.requires_grad = f"stage{i}" in step.unfrozen
+        self._active_freeze_step = step
+        # Kept in sync for the "backbone_frozen" W&B log field, which predates per-stage schedules:
+        # True only while no stage at all is unfrozen yet (pure head-only training).
+        self._backbone_frozen = not any(t.startswith("stage") for t in step.unfrozen)
+        print(f"[epoch {epoch}] freeze_schedule step: unfrozen={step.unfrozen}")
+
     def train(self) -> None:
         if self._start_epoch >= self.cfg.training.max_epochs:
             print(f"[trainer] resumed at epoch {self._start_epoch}, but max_epochs={self.cfg.training.max_epochs} "
                   "is already reached — nothing to train. Raise --max_epochs to continue further.")
         for epoch in range(self._start_epoch, self.cfg.training.max_epochs):
-            if self._backbone_frozen and epoch >= self.cfg.training.frozen_epochs:
+            if self.cfg.training.freeze_schedule is not None:
+                self._apply_freeze_schedule(epoch)
+            elif self._backbone_frozen and epoch >= self.cfg.training.frozen_epochs:
                 self._set_backbone_frozen(False)
                 print(f"[epoch {epoch}] backbone unfrozen")
 

@@ -81,6 +81,47 @@ def test_wrapper_prefix_is_stripped(tmp_path, legacy_state):
     assert not any(k.startswith("segformer.decode_head") for k in state)
 
 
+def test_extract_reads_this_projects_own_training_checkpoint_format(tmp_path):
+    """training/trainer.py::_save_checkpoint wraps weights under "model_state_dict" (not
+    "state_dict") and the wrapper module is a SegFormerSegModel, whose own state_dict keys are
+    prefixed "net." -- both must be handled so task_pretrained_checkpoint can point at a prior run
+    of this project, not just an external checkpoint."""
+    net = _tiny_segformer(5)
+    project_checkpoint = {
+        "epoch": 5,
+        "model_state_dict": {f"net.{k}": v for k, v in net.state_dict().items()},
+        "optimizer_state_dict": {},
+        "config": {"model": {"num_classes": 5}},
+    }
+    p = tmp_path / "best.pt"
+    torch.save(project_checkpoint, p)
+
+    state, fmt = extract_state_dict(p)
+    assert fmt == "state_dict"
+    assert "decode_head.classifier.weight" in state
+    assert not any(k.startswith("net.") for k in state)
+    for k, v in net.state_dict().items():
+        assert torch.equal(state[k], v)
+
+
+def test_load_segformer_pretrained_transfers_encoder_from_a_project_checkpoint_with_different_classes(tmp_path):
+    """The actual fine-tuning use case: a prior run's own best.pt, loaded into a fresh model with a
+    DIFFERENT number of classes -- encoder + decode head transfer, classifier is reinitialised."""
+    torch.manual_seed(7)
+    source = _tiny_segformer(3)
+    p = tmp_path / "best.pt"
+    torch.save({"epoch": 10, "model_state_dict": {f"net.{k}": v for k, v in source.state_dict().items()}}, p)
+
+    target = _tiny_segformer(5)
+    before_classifier = target.decode_head.classifier.weight.clone()
+    report = load_segformer_pretrained(target, p, load_decode_head=True, load_classifier=False)
+
+    assert report["source_num_labels"] == 3 and report["classifier_reinitialised"] is True
+    assert torch.equal(target.decode_head.classifier.weight, before_classifier), "our 5-class head must be kept, not source's 3-class one"
+    assert torch.equal(target.decode_head.linear_fuse.weight, source.decode_head.linear_fuse.weight)
+    assert torch.equal(target.segformer.stages[0].patch_embeddings.proj.weight, source.segformer.stages[0].patch_embeddings.proj.weight)
+
+
 class SegModelForTest(nn.Module):
     """Module-level so pickle can save it; deleted before loading to mimic the real checkpoint,
     whose `__main__.SegModel` / `vit_model_utils.SegModel` class does not exist here."""

@@ -8,6 +8,7 @@ data/processed/
 viz/
 deploy/
 out/
+logs/
 *:Zone.Identifier
 *.log
 *.txt

@@ -127,6 +127,17 @@ class LossConfig:
 
 
 @dataclass
+class FreezeScheduleStep:
+    """One step of training.freeze_schedule: from `epoch` onward (until the next step's epoch),
+    exactly the modules named in `unfrozen` are trainable. Tokens: "head" and "stage1".."stageN"
+    (SegFormer's MiT encoder stages, 1-based) -- validated against the actual model's stage count
+    in training/trainer.py, since that's model-specific and not known here."""
+
+    epoch: int
+    unfrozen: list[str]
+
+
+@dataclass
 class TrainingConfig:
     max_epochs: int = 30
     warmup_epochs: int = 2
@@ -166,8 +177,41 @@ class TrainingConfig:
     # resulting bad gradient is discarded — a real run continued 5 useless epochs before early
     # stopping finally caught it; see CLAUDE.md's Pitfalls).
     max_consecutive_nonfinite_batches: int = 20
+    # Opt-in, staged layer-freeze schedule for fine-tuning (default None: every existing config is
+    # unaffected, `frozen_epochs` keeps its exact current binary-latch behavior). Each step says
+    # which modules are trainable from its `epoch` onward, until the next step's epoch. A one-step
+    # schedule (just epoch 0) is a fixed, non-progressive choice -- same mechanism. Mutually
+    # exclusive with a nonzero `frozen_epochs` (ambiguous otherwise). Only SegFormer supports the
+    # "stageN" tokens today (models/segformer_model.py::stage_parameters) -- enforced in
+    # training/trainer.py, where the model is available to check its actual stage count.
+    freeze_schedule: Optional[list[FreezeScheduleStep]] = None
 
     def __post_init__(self) -> None:
+        if self.freeze_schedule is not None:
+            self.freeze_schedule = [
+                step if isinstance(step, FreezeScheduleStep) else FreezeScheduleStep(**step)
+                for step in self.freeze_schedule
+            ]
+            if not self.freeze_schedule:
+                raise ValueError("training.freeze_schedule, if set, must not be an empty list")
+            if self.frozen_epochs != 0:
+                raise ValueError(
+                    "training.freeze_schedule and training.frozen_epochs are mutually exclusive "
+                    "(ambiguous which governs freezing) -- set frozen_epochs=0 when using a schedule"
+                )
+            epochs = [step.epoch for step in self.freeze_schedule]
+            if epochs != sorted(epochs) or len(set(epochs)) != len(epochs):
+                raise ValueError(f"training.freeze_schedule steps must have strictly increasing epochs, got {epochs}")
+            if epochs[0] != 0:
+                raise ValueError(f"training.freeze_schedule's first step must start at epoch=0, got {epochs[0]}")
+            for step in self.freeze_schedule:
+                bad = [t for t in step.unfrozen if t != "head" and not (t.startswith("stage") and t[len("stage"):].isdigit())]
+                if bad:
+                    raise ValueError(
+                        f"training.freeze_schedule step at epoch={step.epoch} has unknown token(s) {bad}; "
+                        "valid tokens are 'head' and 'stage1'/'stage2'/... (checked against the model's "
+                        "actual stage count in training/trainer.py, not here)"
+                    )
         if self.weight_decay <= 0.0:
             raise ValueError(
                 "training.weight_decay must be > 0. A prior SegFormer script used weight_decay=0 "

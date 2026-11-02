@@ -4,7 +4,7 @@ import pytest
 import yaml
 
 from configs.loader import config_to_dict, load_experiment_config
-from configs.schema import DataConfig, LossConfig, ModelConfig, TrainingConfig, WandbConfig
+from configs.schema import DataConfig, FreezeScheduleStep, LossConfig, ModelConfig, TrainingConfig, WandbConfig
 
 REPO = Path(__file__).resolve().parent.parent
 EXPERIMENT = REPO / "configs/experiments/baseline_smp_efficientnet_b0.yaml"
@@ -60,6 +60,40 @@ def test_focal_tversky_gamma_default_off_and_rejects_non_positive():
     for bad in (0.0, -1.0):
         with pytest.raises(ValueError):
             LossConfig(focal_tversky_gamma=bad)
+
+
+def test_freeze_schedule_default_off_and_accepts_dicts_from_yaml():
+    assert TrainingConfig().freeze_schedule is None, "off by default: every existing config is unaffected"
+    cfg = TrainingConfig(
+        frozen_epochs=0,
+        freeze_schedule=[{"epoch": 0, "unfrozen": ["head"]}, {"epoch": 2, "unfrozen": ["head", "stage4"]}],
+    )
+    assert all(isinstance(s, FreezeScheduleStep) for s in cfg.freeze_schedule), "yaml-shaped dicts must be normalised"
+    assert cfg.freeze_schedule[1].epoch == 2 and cfg.freeze_schedule[1].unfrozen == ["head", "stage4"]
+
+
+def test_freeze_schedule_rejects_combination_with_nonzero_frozen_epochs():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        TrainingConfig(frozen_epochs=2, freeze_schedule=[FreezeScheduleStep(0, ["head"])])
+
+
+def test_freeze_schedule_must_start_at_epoch_zero():
+    with pytest.raises(ValueError, match="epoch=0"):
+        TrainingConfig(frozen_epochs=0, freeze_schedule=[FreezeScheduleStep(1, ["head"])])
+
+
+def test_freeze_schedule_rejects_unsorted_or_duplicate_epochs():
+    with pytest.raises(ValueError, match="increasing"):
+        TrainingConfig(frozen_epochs=0, freeze_schedule=[FreezeScheduleStep(0, ["head"]), FreezeScheduleStep(0, ["head", "stage4"])])
+    with pytest.raises(ValueError, match="increasing"):
+        TrainingConfig(frozen_epochs=0, freeze_schedule=[FreezeScheduleStep(2, ["head"]), FreezeScheduleStep(0, ["head", "stage4"])])
+
+
+def test_freeze_schedule_rejects_an_empty_list_and_unknown_tokens():
+    with pytest.raises(ValueError, match="empty"):
+        TrainingConfig(frozen_epochs=0, freeze_schedule=[])
+    with pytest.raises(ValueError, match="unknown token"):
+        TrainingConfig(frozen_epochs=0, freeze_schedule=[FreezeScheduleStep(0, ["decoder"])])
 
 
 def test_min_lr_defaults_to_1e5_and_must_stay_below_both_peak_lrs():

@@ -27,6 +27,18 @@ def test_unknown_model_and_duplicate_registration_raise():
         register_model("segformer")(lambda cfg: None)
 
 
+def test_segformer_stage_parameters_exactly_partition_the_backbone():
+    """num_stages()/stage_parameters() back training/trainer.py's freeze_schedule -- every backbone
+    param must belong to exactly one stage (none left over, none duplicated), not just "some"."""
+    m = models.build_model(ModelConfig(name="segformer", num_classes=5))
+    assert m.num_stages() == 4, "mit-b0 (the default encoder) has 4 MiT stages"
+    backbone_ids = {id(p) for p in m.backbone_parameters()}
+    stage_ids_per_stage = [list({id(p) for p in m.stage_parameters(i)}) for i in range(1, m.num_stages() + 1)]
+    all_stage_ids = [pid for ids in stage_ids_per_stage for pid in ids]
+    assert len(all_stage_ids) == len(set(all_stage_ids)), "no parameter should belong to two stages"
+    assert set(all_stage_ids) == backbone_ids, "stages must exactly cover the backbone, nothing left over"
+
+
 def test_freezing_the_real_backbone_actually_freezes_something():
     m = models.build_model(ModelConfig(name="smp_efficientnet_b0", num_classes=5))
     for p in m.backbone_parameters():

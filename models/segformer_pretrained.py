@@ -105,7 +105,10 @@ def extract_state_dict(path: str | Path) -> tuple[dict[str, torch.Tensor], str]:
         source_format = "pickled_model"
 
     if isinstance(loaded, dict):
-        state = loaded.get("state_dict", loaded)
+        # "model_state_dict" is this project's own training checkpoint format
+        # (training/trainer.py::_save_checkpoint's best.pt/last.pt) -- lets task_pretrained load a
+        # prior run of this project directly, not just external checkpoints.
+        state = loaded.get("state_dict", loaded.get("model_state_dict", loaded))
         if not all(isinstance(v, torch.Tensor) for v in state.values()):
             raise SegformerCheckpointError(f"{path}: dict does not hold only tensors; unsupported checkpoint layout")
         state = {k: v.detach().cpu() for k, v in state.items()}

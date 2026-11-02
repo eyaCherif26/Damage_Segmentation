@@ -133,6 +133,24 @@ python scripts/train.py --config configs/experiments/baseline_smp_efficientnet_b
 Verify a task-pretrained run really used the dacl encoder: the log prints `[init] task_pretrained load report: ... coverage 0.99...`, and `python scripts/check_pretrained_init.py --config <yaml> [--checkpoint runs/<name>/best.pt]` compares weights bit-exactly (CPU, safe during training).
 LR sweep like the dacl10k paper: copy the YAML and change `training.lr_head` / `lr_backbone` (1e-4 … 5e-3); not automated.
 
+**Fine-tuning a prior run onto a different dataset/class set** (2026-11-02, SegFormer only): `model.task_pretrained_checkpoint` can point at **this project's own prior run** (e.g. `runs/segformer_task_pretrained_cif/best.pt`), not just an external checkpoint — nothing else changes: `load_classifier: false` (the default) reinitialises the classifier for the new run's `data.mvp_classes`, encoder + decode head transfer exactly as any other `task_pretrained` load does. See `configs/experiments/segformer_finetune_cif_to_dacl.yaml` for a worked example (cif-trained checkpoint → dacl10k, different class order not required, just demonstrating the mechanism).
+
+Pair this with a **staged layer-freeze schedule** (`training.freeze_schedule`, mutually exclusive with `frozen_epochs`) to control exactly which layers adapt and when — from head-only up to full fine-tuning, either as one fixed choice or progressively over epochs:
+```yaml
+training:
+  frozen_epochs: 0          # must be 0 when freeze_schedule is set
+  freeze_schedule:
+    - epoch: 0
+      unfrozen: [head]                                     # epochs 0-1: head only
+    - epoch: 2
+      unfrozen: [head, stage4]                              # epochs 2-3: + the last MiT stage
+    - epoch: 4
+      unfrozen: [head, stage3, stage4]                      # epochs 4-5: + the next stage in
+    - epoch: 6
+      unfrozen: [head, stage1, stage2, stage3, stage4]      # epoch 6+: full fine-tune
+```
+Each step says which modules are trainable from its `epoch` onward (the log prints `[epoch N] freeze_schedule step: unfrozen=[...]` whenever it changes); a one-step schedule (just `epoch: 0`) is the fixed/non-progressive case, same mechanism. Valid tokens are `head` and `stage1`..`stageN` (checked against the model's real stage count — SegFormer's MiT-b0/b1 both have 4). `training.lr_head`/`lr_backbone` already apply separately to whichever of these is currently unfrozen — no separate per-stage LR exists, since both the head and the whole backbone (regardless of which stages are live) share their own single AdamW param group, same as `frozen_epochs` always worked.
+
 **Regularization knobs** (2026-09-23 pass, see CLAUDE.md for the diagnosis that motivated these):
 - Weight decay now excludes biases and norm-layer scale/offset params by default (unconditional — no config flag; every run benefits automatically).
 - `training.grad_clip_max_norm` (default `None` = off): caps the gradient norm before each optimizer step. Set e.g. `1.0` in a new run's YAML to try it; no existing config sets it.
