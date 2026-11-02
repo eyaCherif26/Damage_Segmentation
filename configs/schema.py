@@ -31,8 +31,12 @@ class DataConfig:
     dataset_config_paths: dict[str, str] = field(default_factory=dict)
     mvp_classes: list[str] = field(default_factory=lambda: list(MVP_CLASSES))
     image_size: int = 512
-    dacl10k_test_strategy: str = "carve_val_from_train"  # or "val_only"
-    dacl10k_val_fraction: float = 0.1
+    dacl10k_test_strategy: str = "carve_val_from_train"  # or "val_only" or "split_val_into_val_test"
+    dacl10k_val_fraction: float = 0.1  # used by carve_val_from_train
+    # used by split_val_into_val_test: fraction of the official dacl10k validation split held out as
+    # a true test set (the rest stays val, for threshold selection) -- unlike carve_val_from_train,
+    # here ALL of the official train split is used for training (nothing carved out of it).
+    dacl10k_test_fraction: float = 0.2
     split_seed: int = 42
     batch_size: int = 8
     num_workers: int = 4
@@ -54,13 +58,15 @@ class DataConfig:
     sources_resolved: dict[str, DatasetSourceConfig] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        if self.dacl10k_test_strategy not in ("carve_val_from_train", "val_only"):
+        if self.dacl10k_test_strategy not in ("carve_val_from_train", "val_only", "split_val_into_val_test"):
             raise ValueError(
-                f"data.dacl10k_test_strategy must be 'carve_val_from_train' or 'val_only', "
-                f"got {self.dacl10k_test_strategy!r}"
+                f"data.dacl10k_test_strategy must be 'carve_val_from_train', 'val_only', or "
+                f"'split_val_into_val_test', got {self.dacl10k_test_strategy!r}"
             )
         if not (0.0 < self.dacl10k_val_fraction < 1.0):
             raise ValueError("data.dacl10k_val_fraction must be in (0, 1)")
+        if not (0.0 < self.dacl10k_test_fraction < 1.0):
+            raise ValueError("data.dacl10k_test_fraction must be in (0, 1)")
         if self.resize_mode not in ("whole_image", "native_crop"):
             raise ValueError(f"data.resize_mode must be 'whole_image' or 'native_crop', got {self.resize_mode!r}")
         if self.pixel_scale <= 0:

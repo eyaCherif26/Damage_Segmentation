@@ -43,6 +43,19 @@ def _dacl10k_split_image_ids(source_cfg: DatasetSourceConfig, data_cfg: DataConf
         return {"train": carve["train_ids"], "val": carve["val_ids"], "test": val_ids}
     elif data_cfg.dacl10k_test_strategy == "val_only":
         return {"train": train_ids, "val": val_ids, "test": val_ids}
+    elif data_cfg.dacl10k_test_strategy == "split_val_into_val_test":
+        # All of official train is used for training (nothing carved out of it); the official val
+        # split is itself split into a kept val (threshold selection) and a held-out test, reusing
+        # the exact same fixed-seed carve machinery as carve_val_from_train -- just applied to val's
+        # image ids instead of train's. carve_train_val's own "train"/"val" naming is generic: here
+        # its "train_ids" (the larger kept share) becomes OUR val, and its "val_ids" (the fraction
+        # taken out) becomes OUR test.
+        persist_path = REPO_ROOT / "data" / "splits" / f"dacl10k_val_test_split_seed{data_cfg.split_seed}.json"
+        split = load_or_create_carve(persist_path, val_ids, data_cfg.split_seed, data_cfg.dacl10k_test_fraction)
+        assert_disjoint_image_ids(
+            set(split["train_ids"]), set(split["val_ids"]), names=["dacl10k_val_kept", "dacl10k_test_held_out"]
+        )
+        return {"train": train_ids, "val": split["train_ids"], "test": split["val_ids"]}
     else:
         raise ValueError(f"Unknown dacl10k_test_strategy: {data_cfg.dacl10k_test_strategy!r}")
 

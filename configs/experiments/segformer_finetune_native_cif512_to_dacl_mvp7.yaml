@@ -1,0 +1,106 @@
+# Fine-tunes runs/segformer_native_cif_512/best.pt (SegFormer MiT-b0, native_crop 512px, 5 classes,
+# cif_coco only) onto dacl10k with the NEW 7-class taxonomy (dacl10k_19_to_mvp7.yaml: Cracks, Rust,
+# Efflorescence, Wetspot, Spalling, WConccor, Graffiti). encoder_name MUST stay mit-b0 to match that
+# checkpoint's own architecture (confirmed from its saved config -- do not change to b1).
+#
+# freeze_schedule (MY READING of "1 epoch only decoder, the rest unfreeze also stage 3-4" --
+# PLEASE CONFIRM before running, easy to edit if wrong): epoch 0 = head/decoder only; epochs 1-9 =
+# head + encoder stages 3-4 (stages 1-2 stay frozen for the whole 10-epoch run).
+#
+# dacl10k_test_strategy: split_val_into_val_test (new, 2026-11) -- ALL of official dacl10k train is
+# used for training (nothing carved out of it); the official validation split is itself split
+# 80/20 (dacl10k_test_fraction) into a kept val (threshold selection) and a held-out test.
+#
+# early_stopping_patience raised to 10 (> max_epochs) so this explicit 10-epoch test run completes
+# in full rather than possibly stopping early on a short run -- lower it back for a real full run.
+name: segformer_finetune_native_cif512_to_dacl_mvp7
+seed: 42
+data:
+  sources:
+  - dacl10k
+  dataset_config_paths:
+    dacl10k: configs/data/datasets/dacl10k_mvp7.yaml
+  mvp_classes:
+  - Cracks
+  - Rust
+  - Efflorescence
+  - Wetspot
+  - Spalling
+  - WConccor
+  - Graffiti
+  image_size: 512
+  dacl10k_test_strategy: split_val_into_val_test
+  dacl10k_test_fraction: 0.2
+  split_seed: 42
+  batch_size: 8
+  num_workers: 4
+  resize_mode: native_crop
+  pixel_scale: 1.0
+  train_scale_jitter: 0.25
+  fg_crop_prob: 0.7
+  train_crops_per_image: 1
+  val_crops_per_image: 1
+model:
+  name: segformer
+  encoder_name: nvidia/mit-b0
+  init_mode: task_pretrained
+  dropout: 0.2
+  num_classes: 7
+  thin_structure_classes:
+  - Cracks
+  task_pretrained_checkpoint: runs/segformer_native_cif_512/best.pt
+  load_decode_head: true
+  load_classifier: false
+loss:
+  focal_weight: 1.0
+  dice_weight: 1.0
+  boundary_weight: 0.0
+  dice_variant: tversky
+  default_alpha: 0.25
+  default_gamma: 2.0
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  per_class_alpha:
+    Cracks: 0.35
+  per_class_gamma:
+    Cracks: 2.5
+training:
+  max_epochs: 10
+  warmup_epochs: 2
+  lr_head: 0.0006
+  lr_backbone: 6.0e-05
+  weight_decay: 0.01
+  frozen_epochs: 0  # mutually exclusive with freeze_schedule below
+  freeze_schedule:
+  - epoch: 0
+    unfrozen: [head]
+  - epoch: 1
+    unfrozen: [head, stage3, stage4]
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.0001
+  early_stopping_metric: val_macro_dice
+  device: cuda
+  amp: true
+  grad_accum_steps: 1
+  checkpoint_dir: runs
+augmentation:
+  horizontal_flip_p: 0.5
+  vertical_flip_p: 0.5
+  rotate90_p: 0.5
+  shift_scale_rotate_p: 0.5
+  shift_limit: 0.05
+  scale_limit: 0.1
+  rotate_limit: 15
+  blur_p: 0.3
+  blur_sigma_min: 0.4
+  blur_sigma_max: 2.5
+  color_jitter_p: 0.5
+  brightness_limit: 0.2
+  contrast_limit: 0.2
+  hue_shift_limit: 5
+wandb:
+  entity: eya-cherif14
+  project: damage_detection
+  mode: online
+  log_images_every_n_epochs: 5
+  num_logged_images: 8
