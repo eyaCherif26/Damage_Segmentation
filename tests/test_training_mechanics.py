@@ -5,6 +5,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
+import models
+from configs.schema import FreezeScheduleStep, ModelConfig
 from training.early_stopping import EarlyStopping
 from training.schedule import build_warmup_cosine_scheduler
 from training.trainer import Trainer
@@ -110,6 +112,60 @@ def test_frozen_backbone_receives_no_update():
     loss.backward()
     opt.step()
     assert torch.equal(before, backbone.weight), "AdamW weight decay must not touch a param with no grad"
+
+
+# ---------------------------------------------------------------------- staged freeze schedule
+
+def _segformer_trainer_for_freeze_tests(freeze_schedule):
+    m = models.build_model(ModelConfig(name="segformer", num_classes=3))
+    t = Trainer.__new__(Trainer)
+    t.model = m
+    t.cfg = SimpleNamespace(model=SimpleNamespace(name="segformer"), training=SimpleNamespace(freeze_schedule=freeze_schedule))
+    t._active_freeze_step = None
+    return t
+
+
+def _stage_trainable(model, i):
+    return all(p.requires_grad for p in model.stage_parameters(i))
+
+
+def _head_trainable(model):
+    return all(p.requires_grad for p in model.head_parameters())
+
+
+def test_freeze_schedule_sets_requires_grad_per_step_and_holds_the_last_step_past_its_range():
+    schedule = [
+        FreezeScheduleStep(0, ["head"]),
+        FreezeScheduleStep(2, ["head", "stage4"]),
+        FreezeScheduleStep(4, ["head", "stage3", "stage4"]),
+    ]
+    t = _segformer_trainer_for_freeze_tests(schedule)
+    t._validate_freeze_schedule()
+
+    t._apply_freeze_schedule(0)
+    assert _head_trainable(t.model) and not any(_stage_trainable(t.model, i) for i in range(1, 5))
+
+    t._apply_freeze_schedule(1)  # between step boundaries -> still step 0's config
+    assert _head_trainable(t.model) and not any(_stage_trainable(t.model, i) for i in range(1, 5))
+
+    t._apply_freeze_schedule(2)
+    assert _head_trainable(t.model) and _stage_trainable(t.model, 4) and not _stage_trainable(t.model, 3)
+
+    t._apply_freeze_schedule(10)  # past the last defined step -> keeps using it, not an error
+    assert _head_trainable(t.model) and _stage_trainable(t.model, 3) and _stage_trainable(t.model, 4)
+    assert not _stage_trainable(t.model, 1) and not _stage_trainable(t.model, 2)
+
+
+def test_freeze_schedule_validation_rejects_a_model_without_stage_support():
+    m = models.build_model(ModelConfig(name="smp_efficientnet_b0", num_classes=3))
+    t = Trainer.__new__(Trainer)
+    t.model = m
+    t.cfg = SimpleNamespace(
+        model=SimpleNamespace(name="smp_efficientnet_b0"),
+        training=SimpleNamespace(freeze_schedule=[FreezeScheduleStep(0, ["head"])]),
+    )
+    with pytest.raises(ValueError, match="does not support per-stage freezing"):
+        t._validate_freeze_schedule()
 
 
 def test_early_stopping_patience_and_best_tracking():

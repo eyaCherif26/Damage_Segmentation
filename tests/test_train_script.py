@@ -119,3 +119,55 @@ def test_resume_when_already_at_max_epochs_is_a_safe_no_op(tmp_path):
     assert second.returncode == 0, second.stderr[-3000:]
     assert "already reached" in second.stdout
     assert "[epoch 0]" not in second.stdout
+
+
+# ------------------------------------------------- fine-tuning from a prior run's own checkpoint
+
+SEGFORMER_CONFIG = REPO / "configs/experiments/baseline_segformer.yaml"
+
+
+def test_finetune_from_a_prior_checkpoint_transfers_encoder_and_reinits_classifier(tmp_path):
+    """The actual fine-tuning use case: point model.task_pretrained_checkpoint at THIS project's own
+    prior run (not an external checkpoint), targeting a different number of classes, with a
+    head-only freeze_schedule step -- after training, the encoder must be byte-identical to the
+    transferred source (nothing but the head had requires_grad=True) and the classifier must have
+    the NEW run's class count, not the source's."""
+    import torch
+
+    import models
+    from configs.schema import ModelConfig
+
+    source_model = models.build_model(ModelConfig(name="segformer", encoder_name="nvidia/mit-b0", num_classes=3, dropout=0.2))
+    ckpt_path = tmp_path / "prior_run_best.pt"
+    torch.save({"epoch": 9, "model_state_dict": source_model.state_dict()}, ckpt_path)
+
+    cfg = yaml.safe_load(SEGFORMER_CONFIG.read_text())
+    cfg["data"]["mvp_classes"] = ["Cracks", "Wetspot", "Spalling", "Rust"]  # 4 classes: different from source's 3
+    cfg["model"]["num_classes"] = 4
+    cfg["model"]["init_mode"] = "task_pretrained"
+    cfg["model"]["task_pretrained_checkpoint"] = str(ckpt_path)
+    cfg["model"]["load_decode_head"] = True
+    cfg["model"]["load_classifier"] = False
+    cfg["training"]["frozen_epochs"] = 0  # mutually exclusive with freeze_schedule
+    cfg["training"]["freeze_schedule"] = [{"epoch": 0, "unfrozen": ["head"]}]  # nothing in the backbone should move
+    finetune_config = tmp_path / "finetune.yaml"
+    finetune_config.write_text(yaml.safe_dump(cfg))
+
+    env = {**os.environ, "CUDA_VISIBLE_DEVICES": "", "NO_ALBUMENTATIONS_UPDATE": "1"}
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--config", str(finetune_config), "--wandb_mode", "disabled",
+         "--max_epochs", "1", "--max_train_images", "4", "--max_val_images", "4",
+         "--checkpoint_dir", str(tmp_path / "run")],
+        cwd=REPO, env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert "classifier_reinitialised': True" in proc.stdout, proc.stdout[-3000:]
+    assert "[epoch 0] freeze_schedule step: unfrozen=['head']" in proc.stdout
+
+    result = torch.load(tmp_path / "run" / "baseline_segformer" / "last.pt", map_location="cpu", weights_only=False)
+    trained_state = result["model_state_dict"]
+    source_state = source_model.state_dict()
+    for k, v in source_state.items():
+        if k.startswith("net.segformer."):
+            assert torch.equal(trained_state[k], v), f"{k} moved despite the backbone being frozen all epoch"
+    assert trained_state["net.decode_head.classifier.weight"].shape[0] == 4, "classifier must match the NEW run's class count"

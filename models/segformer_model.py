@@ -54,6 +54,14 @@ class SegFormerSegModel(nn.Module):
     def head_parameters(self):
         return self.net.decode_head.parameters()
 
+    def num_stages(self) -> int:
+        """MiT's 4 hierarchical encoder stages, for per-stage freeze schedules (training/trainer.py)."""
+        return len(self.net.segformer.stages)
+
+    def stage_parameters(self, stage_idx: int):
+        """1-based (1..num_stages()): stage 1 is the encoder's first/earliest stage."""
+        return self.net.segformer.stages[stage_idx - 1].parameters()
+
 
 @register_model("segformer")
 def build_segformer(cfg: ModelConfig) -> SegFormerSegModel:
