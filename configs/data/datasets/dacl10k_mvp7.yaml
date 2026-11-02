@@ -1,0 +1,14 @@
+# Same raw dacl10k source as configs/data/datasets/dacl10k.yaml -- only label_mapping_path differs,
+# targeting the 7-class taxonomy (dacl10k_19_to_mvp7.yaml) instead of the 5-class one.
+name: dacl10k
+images_roots:
+  train: /home/eyacherif/Projects/port_damage_EC/data/dacl10k_v2_devphase/images/train
+  val: /home/eyacherif/Projects/port_damage_EC/data/dacl10k_v2_devphase/images/val
+annotations:
+  train: ../../../data/processed/dacl10k_merged/train/annotations.json
+  val: ../../../data/processed/dacl10k_merged/val/annotations.json
+label_mapping_path: configs/data/label_maps/dacl10k_19_to_mvp7.yaml
+native_categories:
+  [ACrack, Bearing, Cavity, Crack, Drainage, EJoint, Efflorescence, ExposedRebars, Graffiti,
+   Hollowareas, JTape, PEquipment, Restformwork, Rockpocket, Rust, Spalling, WConccor,
+   Weathering, Wetspot]

@@ -1,0 +1,101 @@
+# Fine-tunes runs/segformer_native_cif_512/best.pt (SegFormer MiT-b0, native_crop 512px, 5 classes,
+# cif_coco only) onto the NEW bwp_kaimauer_infra dataset (~333 samples, own train/val/test split),
+# restricted to 3 classes: Cracks, Spalling, Efflorescence. Identical to
+# segformer_finetune_native_cif512_to_dacl_mvp7.yaml in every block EXCEPT `data:` and
+# `model.num_classes`/`mvp_classes` (per your "same config, only change the data" instruction) --
+# same checkpoint, same freeze_schedule, same loss/training/augmentation/wandb settings.
+#
+# Zero-annotation images (a clip with no damage) are already handled correctly by the data loading
+# code -- confirmed directly, not assumed: CocoMultiLabelSegDataset/CocoCropDataset index every
+# image in annotations.json's "images" list (not just images that have annotations), and a missing
+# entry in annotations_by_image defaults to an empty list -> an all-background mask, not a dropped
+# sample. No code change was needed for this.
+#
+# EDIT configs/data/datasets/bwp_kaimauer_infra.yaml's paths and
+# configs/data/label_maps/bwp_kaimauer_infra_to_mvp3.yaml's native category names before running --
+# both are placeholders pending the real dataset path and its actual COCO category names.
+name: segformer_finetune_native_cif512_to_bwp_kaimauer3
+seed: 42
+data:
+  sources:
+  - bwp_kaimauer_infra
+  dataset_config_paths:
+    bwp_kaimauer_infra: configs/data/datasets/bwp_kaimauer_infra.yaml
+  mvp_classes:
+  - Cracks
+  - Spalling
+  - Efflorescence
+  image_size: 512
+  split_seed: 42
+  batch_size: 8
+  num_workers: 4
+  resize_mode: native_crop
+  pixel_scale: 1.0
+  train_scale_jitter: 0.25
+  fg_crop_prob: 0.7
+  train_crops_per_image: 1
+  val_crops_per_image: 1
+model:
+  name: segformer
+  encoder_name: nvidia/mit-b0
+  init_mode: task_pretrained
+  dropout: 0.2
+  num_classes: 3
+  thin_structure_classes:
+  - Cracks
+  task_pretrained_checkpoint: runs/segformer_native_cif_512/best.pt
+  load_decode_head: true
+  load_classifier: false
+loss:
+  focal_weight: 1.0
+  dice_weight: 1.0
+  boundary_weight: 0.0
+  dice_variant: tversky
+  default_alpha: 0.25
+  default_gamma: 2.0
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  per_class_alpha:
+    Cracks: 0.35
+  per_class_gamma:
+    Cracks: 2.5
+training:
+  max_epochs: 10
+  warmup_epochs: 2
+  lr_head: 0.0006
+  lr_backbone: 6.0e-05
+  weight_decay: 0.01
+  frozen_epochs: 0  # mutually exclusive with freeze_schedule below
+  freeze_schedule:
+  - epoch: 0
+    unfrozen: [head]
+  - epoch: 1
+    unfrozen: [head, stage3, stage4]
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.0001
+  early_stopping_metric: val_macro_dice
+  device: cuda
+  amp: true
+  grad_accum_steps: 1
+  checkpoint_dir: runs
+augmentation:
+  horizontal_flip_p: 0.5
+  vertical_flip_p: 0.5
+  rotate90_p: 0.5
+  shift_scale_rotate_p: 0.5
+  shift_limit: 0.05
+  scale_limit: 0.1
+  rotate_limit: 15
+  blur_p: 0.3
+  blur_sigma_min: 0.4
+  blur_sigma_max: 2.5
+  color_jitter_p: 0.5
+  brightness_limit: 0.2
+  contrast_limit: 0.2
+  hue_shift_limit: 5
+wandb:
+  entity: eya-cherif14
+  project: damage_detection
+  mode: online
+  log_images_every_n_epochs: 5
+  num_logged_images: 8

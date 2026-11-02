@@ -1,0 +1,18 @@
+# bwp_kaimauer_infra -> MVP 3-class taxonomy (this experiment's focus: Cracks, Spalling, Efflorescence only).
+#
+# Native names on the left per the project's own annotation spec (Kaimauer_Annotation_Prompt_5_
+# Classes_v3.md, 5 output labels: Spalling, Crack, Efflorescence, Rust, Wetspot) -- NOT a guess from
+# chat shorthand. VERIFY against the real annotations.json "categories" list once the data lands;
+# edit below if it differs (e.g. a different spelling/casing was actually exported).
+
+Crack: Cracks
+Spalling: Spalling
+Efflorescence: Efflorescence
+
+# The annotation spec defines 5 classes total; Rust and Wetspot are in scope for the SOURCE data
+# but not for this run's 3-class focus -- mapped to null (confirmed negative), not omitted, since
+# an omitted-but-present category would raise at training time (LabelMapping.check_covers) rather
+# than silently being dropped. Remove these two lines if this particular export truly only has 3
+# categories to begin with.
+Rust: null
+Wetspot: null

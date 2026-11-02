@@ -32,11 +32,28 @@ _DELIBERATE_1024_CONFIGS = {
     "segformer_cif_1024.yaml", "segformer_native_cif_1024.yaml",
 }
 
+# Deliberate taxonomy ablations (see CLAUDE.md), each named explicitly -- same pattern as
+# _DELIBERATE_1024_CONFIGS -- so an accidental THIRD/fourth/... taxonomy divergence still fails
+# loudly instead of silently joining the exception list.
+_DELIBERATE_TAXONOMY_CONFIGS: dict[str, tuple[str, ...]] = {
+    # 2026-11-02: fine-tunes onto dacl10k with a NEW 7-class label map (dacl10k_19_to_mvp7.yaml).
+    "segformer_finetune_native_cif512_to_dacl_mvp7.yaml":
+        ("Cracks", "Rust", "Efflorescence", "Wetspot", "Spalling", "WConccor", "Graffiti"),
+    # 2026-11-02: fine-tunes onto the new bwp_kaimauer_infra dataset, restricted to 3 classes.
+    "segformer_finetune_native_cif512_to_bwp_kaimauer3.yaml": ("Cracks", "Spalling", "Efflorescence"),
+}
+
 
 def test_every_experiment_shares_augmentation_resolution_and_classes():
     configs = [load_experiment_config(f) for f in EXPERIMENTS]
     assert len({json.dumps(dataclasses.asdict(c.augmentation), sort_keys=True) for c in configs}) == 1
-    assert len({tuple(c.data.mvp_classes) for c in configs}) == 1
+
+    default_classes = {tuple(c.data.mvp_classes) for f, c in zip(EXPERIMENTS, configs) if Path(f).name not in _DELIBERATE_TAXONOMY_CONFIGS}
+    assert len(default_classes) == 1, f"the non-ablation configs must still share one class list, got {default_classes}"
+    for f, c in zip(EXPERIMENTS, configs):
+        expected = _DELIBERATE_TAXONOMY_CONFIGS.get(Path(f).name)
+        if expected is not None:
+            assert tuple(c.data.mvp_classes) == expected, f"{f}: expected the documented taxonomy {expected}, got {c.data.mvp_classes}"
     assert len({c.data.no_data_validity for c in configs}) == 1
 
     default_res = {c.data.image_size for f, c in zip(EXPERIMENTS, configs) if Path(f).name not in _DELIBERATE_1024_CONFIGS}

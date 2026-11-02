@@ -1,0 +1,16 @@
+# bwp_kaimauer_infra: ~333 samples, own train/val/test split (each split: images/ + annotations.json).
+# EDIT images_roots/annotations below to the real path on your machine (relative paths resolve
+# against this YAML's own directory; absolute paths are used as-is).
+name: bwp_kaimauer_infra
+images_roots:
+  train: /path/to/bwp_kaimauer_infra/train/images
+  val: /path/to/bwp_kaimauer_infra/val/images
+  test: /path/to/bwp_kaimauer_infra/test/images
+annotations:
+  train: /path/to/bwp_kaimauer_infra/train/annotations.json
+  val: /path/to/bwp_kaimauer_infra/val/annotations.json
+  test: /path/to/bwp_kaimauer_infra/test/annotations.json
+label_mapping_path: configs/data/label_maps/bwp_kaimauer_infra_to_mvp3.yaml
+# Per the project's own annotation spec (Kaimauer_Annotation_Prompt_5_Classes_v3.md) -- VERIFY
+# against the real annotations.json "categories" list once the data lands; edit if it differs.
+native_categories: [Crack, Spalling, Efflorescence, Rust, Wetspot]
